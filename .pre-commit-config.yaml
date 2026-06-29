@@ -1,0 +1,37 @@
+# Конфигурация pre-commit. См. https://pre-commit.com/
+# Установка хуков: uv run pre-commit install
+# Ручной запуск на всех файлах: uv run pre-commit run --all-files
+
+repos:
+  # ─── Базовые проверки файлов ─────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace        # убирает пробелы в конце строк
+      - id: end-of-file-fixer          # гарантирует \n в конце файла
+      - id: check-yaml                 # валидность YAML
+      - id: check-toml                 # валидность TOML
+      - id: check-added-large-files    # защита от коммита больших файлов
+        args: ['--maxkb=1000']         # лимит 1 МБ
+      - id: check-merge-conflict       # не закоммитить файл с маркерами merge-конфликта
+      - id: mixed-line-ending          # единый стиль переносов строк
+        args: ['--fix=lf']             # принудительно LF (важно на Windows!)
+
+  # ─── Ruff: формат + линт ─────────────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff-format              # сначала форматируем
+      - id: ruff                     # потом линтим
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # ─── mypy: type checking ─────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        # mypy в pre-commit запускается в своей изолированной venv.
+        # Чтобы он видел наши типы, надо явно указать зависимости.
+        # Пока их нет — добавим по мере появления (pydantic, httpx и т.д.).
+        additional_dependencies: []
+        args: [--config-file=pyproject.toml]

@@ -1,0 +1,75 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.egg
+*.so
+.eggs/
+develop_eggs/
+eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+MANIFEST
+*.manifest
+*.spec
+
+# Virtual environments
+.venv
+venv/
+env/
+ENV/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checking & lingting
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.dmypy.json
+
+# Enviroment & secrets
+.env
+.env.*
+!.env.example
+
+# DB & Logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# IDE - VSCode
+.vscode/
+!settings.json
+!extensions.json
+
+# IDE - Pycharm на всякий =))
+.idea/
+
+# OS -TRASSSHHH
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker & etc =))
+*.pid
+
+# O_o Jupyter maybe maybe
+.ipynb_checkpoints/
