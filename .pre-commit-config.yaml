@@ -33,5 +33,6 @@ repos:
         # mypy в pre-commit запускается в своей изолированной venv.
         # Чтобы он видел наши типы, надо явно указать зависимости.
         # Пока их нет — добавим по мере появления (pydantic, httpx и т.д.).
-        additional_dependencies: []
+        additional_dependencies:
+        - httpx
         args: [--config-file=pyproject.toml]

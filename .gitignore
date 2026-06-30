@@ -35,6 +35,7 @@ htmlcov/
 coverage.xml
 *.cover
 .hypothesis/
+smoke-test.py
 
 # Type checking & lingting
 .mypy_cache/
