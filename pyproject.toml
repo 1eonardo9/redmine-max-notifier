@@ -11,6 +11,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
+    "pydantic>=2.13.4",
 ]
 
 [build-system]
@@ -45,7 +46,11 @@ select = [
 ]
 
 # Что игнорируем глобально
-ignore = []
+ignore = [
+    "RUF001",  # ambiguous unicode in strings (мешает русским литералам)
+    "RUF002",  # ambiguous unicode in docstrings (мешает русским docstring)
+    "RUF003",  # ambiguous unicode in comments (мешает русским комментариям)
+]
 
 [tool.ruff.lint.per-file-ignores]
 # В тестах разрешаем некоторые вольности

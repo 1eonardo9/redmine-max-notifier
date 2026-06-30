@@ -35,4 +35,5 @@ repos:
         # Пока их нет — добавим по мере появления (pydantic, httpx и т.д.).
         additional_dependencies:
         - httpx
+        - pydantic
         args: [--config-file=pyproject.toml]
