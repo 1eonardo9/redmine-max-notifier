@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -14,12 +19,28 @@ from redmine_max_notifier.redmine.exceptions import (
 )
 from redmine_max_notifier.redmine.models import Issue, Journal, User
 
+log = logging.getLogger(__name__)
+
 
 class RedmineClient:
-    def __init__(self, base_url: str, api_key: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float = 10.0,
+        *,
+        max_attempts: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 30.0,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts должно быть >= 1, получено {max_attempts}")
         self._base_url = base_url
         self._api_key = api_key
         self._timeout = timeout
+        self._max_attempts = max_attempts
+        self._retry_base_delay = retry_base_delay
+        self._retry_max_delay = retry_max_delay
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={
@@ -35,7 +56,7 @@ class RedmineClient:
         """Закрыть внутренний HTTP-клиент и освободить пул соединений."""
         await self._client.aclose()
 
-    async def __aenter__(self) -> "RedmineClient":
+    async def __aenter__(self) -> RedmineClient:
         return self
 
     async def __aexit__(
@@ -54,101 +75,130 @@ class RedmineClient:
         params: dict[str, str | int | bool | None] | None = None,
         json_body: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        """Выполнить HTTP-запрос к Redmine и вернуть распарсенный JSON.
+        """Отправить HTTP-запрос к Redmine и вернуть распарсенный JSON.
 
-        Транспортные ошибки (сеть, таймаут, TLS) оборачиваются в
-        RedmineTransportError. Ошибки уровня API (4xx/5xx) — в конкретный
-        подкласс RedmineAPIError по коду статуса.
+        Транспортные ошибки (сеть, таймаут) и 5xx автоматически ретраятся
+        с экспоненциальным бэкоффом и jitter'ом. 4xx ретраить бессмысленно —
+        прокидываются наружу с первой попытки.
         """
-        # --- 1. Сам HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
-        try:
-            response = await self._client.request(
-                method=method,
-                url=path,
-                params=params,
-                json=json_body,
-            )
-        except httpx.TimeoutException as exc:
-            # Таймаут — специфичнее TransportError, ловим первым.
-            raise RedmineTransportError(
-                f"таймаут при запросе {method} {path}",
-                url=path,
-            ) from exc
-        except httpx.TransportError as exc:
-            # DNS, обрыв соединения, TLS-ошибка, отказ подключения и т.п.
-            raise RedmineTransportError(
-                f"сетевая ошибка при запросе {method} {path}: {exc}",
-                url=path,
-            ) from exc
+        last_exc: RedmineTransportError | RedmineServerError | None = None
 
-        # --- 2. Успех: сразу возвращаем распарсенный JSON. ---
-        if 200 <= response.status_code < 300:
-            data: dict[str, Any] = response.json()
-            return data
-
-        # --- 3. Ошибка API: собираем контекст, маппим статус на нужное исключение. ---
-        # response.text безопасен: тело сохраняется в исключении в обрезанном виде
-        # (см. _truncate в exceptions.py), а X-Redmine-API-Key в тело не попадает.
-        body = response.text
-        status = response.status_code
-
-        # 422 — пытаемся вытащить список errors из JSON-тела Redmine.
-        if status == 422:
-            errors: list[str] | None = None
+        for attempt in range(1, self._max_attempts + 1):
             try:
-                body_json = response.json()
-                if isinstance(body_json, dict):
-                    raw_errors = body_json.get("errors")
-                    if isinstance(raw_errors, list):
-                        errors = [str(e) for e in raw_errors]
-            except ValueError:
-                # Тело не JSON — оставим errors как None, body уже сохранён.
-                pass
-            raise RedmineValidationError(
-                f"валидация не пройдена ({method} {path}): {errors or body}",
-                status_code=status,
-                url=path,
-                response_body=body,
-                errors=errors,
-            )
+                # --- 1. HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
+                try:
+                    response = await self._client.request(
+                        method=method,
+                        url=path,
+                        params=params,
+                        json=json_body,
+                    )
+                except httpx.TimeoutException as exc:
+                    raise RedmineTransportError(
+                        f"таймаут при запросе {method} {path}",
+                        url=path,
+                    ) from exc
+                except httpx.TransportError as exc:
+                    raise RedmineTransportError(
+                        f"сетевая ошибка при запросе {method} {path}: {exc}",
+                        url=path,
+                    ) from exc
 
-        # Остальные коды — маппинг на конкретные классы.
-        if status in (401, 403):
-            raise RedmineAuthError(
-                f"ошибка авторизации {status} для {method} {path}",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if status == 404:
-            raise RedmineNotFoundError(
-                f"ресурс не найден: {method} {path}",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if status == 429:
-            raise RedmineRateLimitError(
-                f"превышен лимит запросов ({method} {path})",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if 500 <= status < 600:
-            raise RedmineServerError(
-                f"серверная ошибка {status} ({method} {path})",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
+                # --- 2. Успех: сразу возвращаем распарсенный JSON. ---
+                if 200 <= response.status_code < 300:
+                    data: dict[str, Any] = response.json()
+                    return data
 
-        # Всё остальное (неожиданные 4xx: 400, 405, 409 и т.д.) — общий APIError.
-        raise RedmineAPIError(
-            f"неожиданный статус {status} ({method} {path})",
-            status_code=status,
-            url=path,
-            response_body=body,
-        )
+                # --- 3. Ошибка API: маппинг статуса на исключение. ---
+                body = response.text
+                status = response.status_code
+
+                if status == 422:
+                    errors: list[str] | None = None
+                    try:
+                        body_json = response.json()
+                        if isinstance(body_json, dict):
+                            raw_errors = body_json.get("errors")
+                            if isinstance(raw_errors, list):
+                                errors = [str(e) for e in raw_errors]
+                    except ValueError:
+                        pass
+                    raise RedmineValidationError(
+                        f"валидация не пройдена ({method} {path}): {errors or body}",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                        errors=errors,
+                    )
+                if status in (401, 403):
+                    raise RedmineAuthError(
+                        f"ошибка авторизации {status} для {method} {path}",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if status == 404:
+                    raise RedmineNotFoundError(
+                        f"ресурс не найден: {method} {path}",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if status == 429:
+                    raise RedmineRateLimitError(
+                        f"превышен лимит запросов ({method} {path})",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if 500 <= status < 600:
+                    raise RedmineServerError(
+                        f"серверная ошибка {status} ({method} {path})",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                raise RedmineAPIError(
+                    f"неожиданный статус {status} ({method} {path})",
+                    status_code=status,
+                    url=path,
+                    response_body=body,
+                )
+
+            except (RedmineTransportError, RedmineServerError) as exc:
+                # --- 4. Ретраим только транспорт и 5xx. ---
+                last_exc = exc
+                if attempt >= self._max_attempts:
+                    log.error(
+                        "исчерпаны попытки (%d/%d) для %s %s: %s",
+                        attempt,
+                        self._max_attempts,
+                        method,
+                        path,
+                        exc,
+                    )
+                    raise
+                delay = min(
+                    self._retry_base_delay
+                    * (2 ** (attempt - 1))
+                    * random.uniform(0.8, 1.2),
+                    self._retry_max_delay,
+                )
+                log.warning(
+                    "попытка %d/%d неудачна (%s %s): %s — повтор через %.2fс",
+                    attempt,
+                    self._max_attempts,
+                    method,
+                    path,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        # Сюда попадаем только если цикл завершился без return и без raise —
+        # теоретически невозможно, но mypy требует явного пути возврата.
+        assert last_exc is not None
+        raise last_exc
 
     async def get_current_user(self) -> User:
         """Получить текущего пользователя (того чей API-key используется)
