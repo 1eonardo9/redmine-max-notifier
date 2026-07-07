@@ -3,6 +3,15 @@ from typing import Any
 
 import httpx
 
+from redmine_max_notifier.redmine.exceptions import (
+    RedmineAPIError,
+    RedmineAuthError,
+    RedmineNotFoundError,
+    RedmineRateLimitError,
+    RedmineServerError,
+    RedmineTransportError,
+    RedmineValidationError,
+)
 from redmine_max_notifier.redmine.models import Issue, Journal, User
 
 
@@ -43,20 +52,103 @@ class RedmineClient:
         path: str,
         *,
         params: dict[str, str | int | bool | None] | None = None,
-        json: dict[str, object] | None = None,
+        json_body: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        """Отправить HTTP-запрос к Redmine и вернуть распарсенный JSON.
-        на этапе 1a — минимальная реализация. Обработка ошибок и ретраи — в 1d.
+        """Выполнить HTTP-запрос к Redmine и вернуть распарсенный JSON.
+
+        Транспортные ошибки (сеть, таймаут, TLS) оборачиваются в
+        RedmineTransportError. Ошибки уровня API (4xx/5xx) — в конкретный
+        подкласс RedmineAPIError по коду статуса.
         """
-        response = await self._client.request(
-            method=method,
+        # --- 1. Сам HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
+        try:
+            response = await self._client.request(
+                method=method,
+                url=path,
+                params=params,
+                json=json_body,
+            )
+        except httpx.TimeoutException as exc:
+            # Таймаут — специфичнее TransportError, ловим первым.
+            raise RedmineTransportError(
+                f"таймаут при запросе {method} {path}",
+                url=path,
+            ) from exc
+        except httpx.TransportError as exc:
+            # DNS, обрыв соединения, TLS-ошибка, отказ подключения и т.п.
+            raise RedmineTransportError(
+                f"сетевая ошибка при запросе {method} {path}: {exc}",
+                url=path,
+            ) from exc
+
+        # --- 2. Успех: сразу возвращаем распарсенный JSON. ---
+        if 200 <= response.status_code < 300:
+            data: dict[str, Any] = response.json()
+            return data
+
+        # --- 3. Ошибка API: собираем контекст, маппим статус на нужное исключение. ---
+        # response.text безопасен: тело сохраняется в исключении в обрезанном виде
+        # (см. _truncate в exceptions.py), а X-Redmine-API-Key в тело не попадает.
+        body = response.text
+        status = response.status_code
+
+        # 422 — пытаемся вытащить список errors из JSON-тела Redmine.
+        if status == 422:
+            errors: list[str] | None = None
+            try:
+                body_json = response.json()
+                if isinstance(body_json, dict):
+                    raw_errors = body_json.get("errors")
+                    if isinstance(raw_errors, list):
+                        errors = [str(e) for e in raw_errors]
+            except ValueError:
+                # Тело не JSON — оставим errors как None, body уже сохранён.
+                pass
+            raise RedmineValidationError(
+                f"валидация не пройдена ({method} {path}): {errors or body}",
+                status_code=status,
+                url=path,
+                response_body=body,
+                errors=errors,
+            )
+
+        # Остальные коды — маппинг на конкретные классы.
+        if status in (401, 403):
+            raise RedmineAuthError(
+                f"ошибка авторизации {status} для {method} {path}",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if status == 404:
+            raise RedmineNotFoundError(
+                f"ресурс не найден: {method} {path}",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if status == 429:
+            raise RedmineRateLimitError(
+                f"превышен лимит запросов ({method} {path})",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if 500 <= status < 600:
+            raise RedmineServerError(
+                f"серверная ошибка {status} ({method} {path})",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+
+        # Всё остальное (неожиданные 4xx: 400, 405, 409 и т.д.) — общий APIError.
+        raise RedmineAPIError(
+            f"неожиданный статус {status} ({method} {path})",
+            status_code=status,
             url=path,
-            params=params,
-            json=json,
+            response_body=body,
         )
-        response.raise_for_status()
-        data: dict[str, object] = response.json()
-        return data
 
     async def get_current_user(self) -> User:
         """Получить текущего пользователя (того чей API-key используется)
