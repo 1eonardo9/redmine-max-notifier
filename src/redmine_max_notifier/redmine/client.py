@@ -27,7 +27,7 @@ class RedmineClient:
         self,
         base_url: str,
         api_key: str,
-        timeout: float = 10.0,
+        timeout: float | httpx.Timeout = 10.0,
         *,
         max_attempts: int = 3,
         retry_base_delay: float = 1.0,
@@ -37,7 +37,15 @@ class RedmineClient:
             raise ValueError(f"max_attempts должно быть >= 1, получено {max_attempts}")
         self._base_url = base_url
         self._api_key = api_key
-        self._timeout = timeout
+        if isinstance(timeout, int | float):
+            self._timeout = httpx.Timeout(
+                connect=5.0,  # Подключение
+                read=timeout,  # чтение, дольше, основной лимит, передаем как есть.
+                write=timeout,  # запись, так же как и чтение, нужно тестировать
+                pool=5.0,  # ожидание соединения из пула
+            )
+        else:
+            self._timeout = timeout
         self._max_attempts = max_attempts
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
@@ -74,6 +82,7 @@ class RedmineClient:
         *,
         params: dict[str, str | int | bool | None] | None = None,
         json_body: dict[str, object] | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
         """Отправить HTTP-запрос к Redmine и вернуть распарсенный JSON.
 
@@ -87,12 +96,15 @@ class RedmineClient:
             try:
                 # --- 1. HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
                 try:
-                    response = await self._client.request(
-                        method=method,
-                        url=path,
-                        params=params,
-                        json=json_body,
-                    )
+                    request_kwargs: dict[str, Any] = {
+                        "method": method,
+                        "url": path,
+                        "params": params,
+                        "json": json_body,
+                    }
+                    if timeout is not None:
+                        request_kwargs["timeout"] = timeout
+                    response = await self._client.request(**request_kwargs)
                 except httpx.TimeoutException as exc:
                     raise RedmineTransportError(
                         f"таймаут при запросе {method} {path}",
@@ -212,6 +224,7 @@ class RedmineClient:
         issue_id: int,
         *,
         include: Sequence[str] | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> Issue:
         """Получить задачу по id.
 
@@ -231,8 +244,9 @@ class RedmineClient:
         params: dict[str, Any] = {}
         if include:
             params["include"] = ",".join(include)
-
-        data = await self._request("GET", f"/issues/{issue_id}.json", params=params)
+        data = await self._request(
+            "GET", f"/issues/{issue_id}.json", params=params, timeout=timeout
+        )
         return Issue.model_validate(data["issue"])
 
     async def get_journals(self, issue_id: int) -> list[Journal]:
@@ -253,6 +267,7 @@ class RedmineClient:
         *,
         include: Sequence[str] | None = None,
         page_size: int = 100,
+        timeout: float | httpx.Timeout | None = None,
         **filters: Any,
     ) -> AsyncIterator[Issue]:
         """Итерировать задачи Redmine с автоматической пагинацией.
@@ -288,7 +303,12 @@ class RedmineClient:
             if include:
                 params["include"] = ",".join(include)
 
-            data = await self._request("GET", "/issues.json", params=params)
+            data = await self._request(
+                "GET",
+                "/issues.json",
+                params=params,
+                timeout=timeout,
+            )
 
             issues_data: list[dict[str, Any]] = data["issues"]
             total_count: int = data["total_count"]

@@ -50,6 +50,7 @@ ignore = [
     "RUF001",  # ambiguous unicode in strings (мешает русским литералам)
     "RUF002",  # ambiguous unicode in docstrings (мешает русским docstring)
     "RUF003",  # ambiguous unicode in comments (мешает русским комментариям)
+    "ASYNC109",  # разрешаем параметр timeout в HTTP-клиенте (передаётся в httpx)
 ]
 
 [tool.ruff.lint.per-file-ignores]
