@@ -1,0 +1,18 @@
+{
+  "issues": [
+    {
+      "id": 203,
+      "project": {"id": 5, "name": "D-TELEKOM Infra"},
+      "tracker": {"id": 1, "name": "Bug"},
+      "status": {"id": 1, "name": "New"},
+      "priority": {"id": 2, "name": "Normal"},
+      "author": {"id": 42, "name": "Leo Test"},
+      "subject": "issue-203",
+      "created_on": "2026-07-01T10:02:00Z",
+      "updated_on": "2026-07-01T10:02:00Z"
+    }
+  ],
+  "total_count": 3,
+  "offset": 2,
+  "limit": 2
+}

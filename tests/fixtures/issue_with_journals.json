@@ -1,0 +1,38 @@
+{
+  "issue": {
+    "id": 101,
+    "project": {"id": 5, "name": "D-TELEKOM Infra"},
+    "tracker": {"id": 1, "name": "Bug"},
+    "status": {"id": 3, "name": "Resolved"},
+    "priority": {"id": 4, "name": "High"},
+    "author": {"id": 42, "name": "Leo Test"},
+    "subject": "DHCP conflict on redmine host",
+    "created_on": "2026-07-01T10:00:00Z",
+    "updated_on": "2026-07-06T09:15:00Z",
+    "journals": [
+      {
+        "id": 555,
+        "user": {"id": 42, "name": "Leo Test"},
+        "notes": "Начал разбираться, подозрение на netplan.",
+        "created_on": "2026-07-02T11:00:00Z",
+        "private_notes": false,
+        "details": []
+      },
+      {
+        "id": 556,
+        "user": {"id": 42, "name": "Leo Test"},
+        "notes": "Починил через nmcli, дубль убран.",
+        "created_on": "2026-07-06T09:15:00Z",
+        "private_notes": false,
+        "details": [
+          {
+            "property": "attr",
+            "name": "status_id",
+            "old_value": "2",
+            "new_value": "3"
+          }
+        ]
+      }
+    ]
+  }
+}

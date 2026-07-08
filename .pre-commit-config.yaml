@@ -36,4 +36,7 @@ repos:
         additional_dependencies:
         - httpx
         - pydantic
+        - pytest
+        - pytest-asyncio
+        - pytest-httpx
         args: [--config-file=pyproject.toml]

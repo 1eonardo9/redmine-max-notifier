@@ -1,0 +1,14 @@
+{
+  "user": {
+    "id": 42,
+    "login": "leo",
+    "admin": true,
+    "firstname": "Leo",
+    "lastname": "Test",
+    "mail": "leo@example.com",
+    "created_on": "2024-01-15T10:20:30Z",
+    "last_login_on": "2026-07-01T08:00:00Z",
+    "api_key": "abc123def456",
+    "custom_fields": []
+  }
+}

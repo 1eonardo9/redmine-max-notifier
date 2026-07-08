@@ -1,0 +1,23 @@
+{
+  "issue": {
+    "id": 101,
+    "project": {"id": 5, "name": "D-TELEKOM Infra"},
+    "tracker": {"id": 1, "name": "Bug"},
+    "status": {"id": 2, "name": "In Progress"},
+    "priority": {"id": 4, "name": "High"},
+    "author": {"id": 42, "name": "Leo Test"},
+    "assigned_to": {"id": 42, "name": "Leo Test"},
+    "subject": "DHCP conflict on redmine host",
+    "description": "Дубль вторичного IP на интерфейсе",
+    "start_date": "2026-07-01",
+    "due_date": "2026-07-15",
+    "done_ratio": 30,
+    "is_private": false,
+    "estimated_hours": 4.0,
+    "custom_fields": [
+      {"id": 7, "name": "Environment", "value": "prod"}
+    ],
+    "created_on": "2026-07-01T10:00:00Z",
+    "updated_on": "2026-07-05T12:30:00Z"
+  }
+}

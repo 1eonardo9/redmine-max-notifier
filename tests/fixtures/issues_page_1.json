@@ -1,0 +1,29 @@
+{
+  "issues": [
+    {
+      "id": 201,
+      "project": {"id": 5, "name": "D-TELEKOM Infra"},
+      "tracker": {"id": 1, "name": "Bug"},
+      "status": {"id": 1, "name": "New"},
+      "priority": {"id": 2, "name": "Normal"},
+      "author": {"id": 42, "name": "Leo Test"},
+      "subject": "issue-201",
+      "created_on": "2026-07-01T10:00:00Z",
+      "updated_on": "2026-07-01T10:00:00Z"
+    },
+    {
+      "id": 202,
+      "project": {"id": 5, "name": "D-TELEKOM Infra"},
+      "tracker": {"id": 1, "name": "Bug"},
+      "status": {"id": 1, "name": "New"},
+      "priority": {"id": 2, "name": "Normal"},
+      "author": {"id": 42, "name": "Leo Test"},
+      "subject": "issue-202",
+      "created_on": "2026-07-01T10:01:00Z",
+      "updated_on": "2026-07-01T10:01:00Z"
+    }
+  ],
+  "total_count": 3,
+  "offset": 0,
+  "limit": 2
+}
