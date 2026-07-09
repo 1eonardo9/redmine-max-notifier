@@ -39,4 +39,5 @@ repos:
         - pytest
         - pytest-asyncio
         - pytest-httpx
+        - python-dotenv
         args: [--config-file=pyproject.toml]
