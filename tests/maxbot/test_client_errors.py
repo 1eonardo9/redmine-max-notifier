@@ -246,3 +246,15 @@ async def test_token_not_leaked_in_exception(
             f"У исключения не должно быть атрибута {danger_attr!r}: "
             "там могут оказаться заголовки с токеном"
         )
+
+
+# tests/maxbot/test_client_errors.py — в самый низ
+
+# ---------- Валидация входа: пустой токен ---------------------------------
+
+
+async def test_empty_token_raises_value_error(max_base_url: str) -> None:
+    """Пустой токен → ValueError в конструкторе. Лучше упасть с понятным
+    сообщением сразу, чем ловить 401 при первом запросе."""
+    with pytest.raises(ValueError, match="токен"):
+        MaxClient(token="", base_url=max_base_url)
