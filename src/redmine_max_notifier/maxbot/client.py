@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 from types import TracebackType
 from typing import Self
 
@@ -74,6 +76,9 @@ class MaxClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: httpx.Timeout | None = None,
         verify: bool | str = True,
+        max_attempts: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 30.0,
     ) -> None:
         """Инициализация клиента.
 
@@ -86,21 +91,32 @@ class MaxClient:
             verify: настройка TLS-верификации, пробрасывается в httpx.
                 Возможные значения:
                 - True — использовать стандартный CA-bundle certifi
-                  (подходит для сайтов с сертификатами западных CA).
+                (подходит для сайтов с сертификатами западных CA).
                 - str — путь к кастомному PEM-файлу с корневыми CA.
-                  Нужно для MAX API: их сертификат подписан национальным
-                  CA Минцифры РФ, которого нет в certifi. Используй
-                  scripts/build_ca_bundle.py чтобы собрать расширенный bundle.
+                Нужно для MAX API: их сертификат подписан национальным
+                CA Минцифры РФ, которого нет в certifi. Используй
+                scripts/build_ca_bundle.py чтобы собрать расширенный bundle.
                 - False — отключить верификацию. НЕ ИСПОЛЬЗУЙ В ПРОДЕ,
-                  только для отладки в контролируемом окружении.
+                только для отладки в контролируемом окружении.
+            max_attempts: максимум попыток на один запрос (первая + ретраи).
+                3 = основная попытка + 2 ретрая. 1 = ретраев нет вообще.
+            retry_base_delay: базовая задержка ретрая в секундах. Каждая
+                следующая попытка удваивает её.
+            retry_max_delay: потолок задержки в секундах. Экспонента не
+                уходит выше этого значения.
         """
         if not token:
             #  Валидация на входе - лучше упасть с понятным сообщение,
             # чем ловить 401 от API уже во время запроса.
             raise ValueError("токен не может быть пустым!!!")
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts должно быть >= 1, получено {max_attempts}")
 
         self._token = token
         self._base_url = base_url.rstrip("/")  # Убираем хвостовой слэш, на всякий.
+        self._max_attempts = max_attempts
+        self._retry_base_delay = retry_base_delay
+        self._retry_max_delay = retry_max_delay
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={
@@ -128,11 +144,11 @@ class MaxClient:
         """Универсальный HTTP-запрос к MAX API.
 
         Все публичные методы клиента должны идти через этот метод — здесь
-        единая точка для логирования, обработки ошибок и (в 2d.3) ретраев.
+        единая точка для логирования, обработки ошибок и ретраев.
 
-        Транспортные ошибки httpx оборачиваются в MaxTransportError,
-        плохие HTTP-статусы — в соответствующие подклассы MaxAPIError.
-        Голый httpx-эксепшн наружу никогда не выходит.
+        Транспортные ошибки (сеть, таймаут) и 5xx автоматически ретраятся
+        с экспоненциальным бэкоффом и jitter'ом. 4xx (включая 429) ретраить
+        бессмысленно — прокидываются наружу с первой попытки.
 
         Args:
             method: HTTP-метод ("GET", "POST", ...).
@@ -148,12 +164,12 @@ class MaxClient:
             Распарсенный JSON-ответ как словарь.
 
         Raises:
-            MaxTransportError: сеть/таймаут/TLS.
+            MaxTransportError: сеть/таймаут/TLS (после исчерпания попыток).
             MaxAuthError: 401.
             MaxNotFoundError: 404.
             MaxValidationError: 400.
             MaxRateLimitError: 429.
-            MaxServerError: 5xx.
+            MaxServerError: 5xx (после исчерпания попыток).
             MaxAPIError: любой другой не-2xx статус (например, 405).
         """
         logger.debug("MAX API запрос: %s %s params=%s", method, path, params)
@@ -165,78 +181,122 @@ class MaxClient:
             timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT
         )
 
-        # --- 1. HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
-        try:
-            response = await self._client.request(
-                method=method,
-                url=path,
-                params=params,
-                json=json,
-                timeout=request_timeout,
-            )
-        except httpx.TimeoutException as exc:
-            raise MaxTransportError(
-                f"таймаут при запросе {method} {path}",
-                url=path,
-            ) from exc
-        except httpx.TransportError as exc:
-            raise MaxTransportError(
-                f"сетевая ошибка при запросе {method} {path}: {exc}",
-                url=path,
-            ) from exc
+        last_exc: MaxTransportError | MaxServerError | None = None
 
-        logger.debug("MAX API ответ: %s %s -> %d", method, path, response.status_code)
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                # --- 1. HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
+                try:
+                    response = await self._client.request(
+                        method=method,
+                        url=path,
+                        params=params,
+                        json=json,
+                        timeout=request_timeout,
+                    )
+                except httpx.TimeoutException as exc:
+                    raise MaxTransportError(
+                        f"таймаут при запросе {method} {path}",
+                        url=path,
+                    ) from exc
+                except httpx.TransportError as exc:
+                    raise MaxTransportError(
+                        f"сетевая ошибка при запросе {method} {path}: {exc}",
+                        url=path,
+                    ) from exc
 
-        # --- 2. Успех: сразу возвращаем распарсенный JSON. ---
-        if 200 <= response.status_code < 300:
-            data: dict[str, object] = response.json()
-            return data
+                logger.debug(
+                    "MAX API ответ: %s %s -> %d",
+                    method,
+                    path,
+                    response.status_code,
+                )
 
-        # --- 3. Ошибка API: маппинг статуса на исключение. ---
-        body = response.text
-        status = response.status_code
+                # --- 2. Успех: сразу возвращаем распарсенный JSON. ---
+                if 200 <= response.status_code < 300:
+                    data: dict[str, object] = response.json()
+                    return data
 
-        if status == 400:
-            raise MaxValidationError(
-                f"валидация не пройдена ({method} {path}): {body}",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if status == 401:
-            raise MaxAuthError(
-                f"ошибка авторизации {status} для {method} {path}",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if status == 404:
-            raise MaxNotFoundError(
-                f"ресурс не найден: {method} {path}",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if status == 429:
-            raise MaxRateLimitError(
-                f"превышен лимит запросов ({method} {path})",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        if 500 <= status < 600:
-            raise MaxServerError(
-                f"серверная ошибка {status} ({method} {path})",
-                status_code=status,
-                url=path,
-                response_body=body,
-            )
-        raise MaxAPIError(
-            f"неожиданный статус {status} ({method} {path})",
-            status_code=status,
-            url=path,
-            response_body=body,
-        )
+                # --- 3. Ошибка API: маппинг статуса на исключение. ---
+                body = response.text
+                status = response.status_code
+
+                if status == 400:
+                    raise MaxValidationError(
+                        f"валидация не пройдена ({method} {path}): {body}",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if status == 401:
+                    raise MaxAuthError(
+                        f"ошибка авторизации {status} для {method} {path}",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if status == 404:
+                    raise MaxNotFoundError(
+                        f"ресурс не найден: {method} {path}",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if status == 429:
+                    raise MaxRateLimitError(
+                        f"превышен лимит запросов ({method} {path})",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                if 500 <= status < 600:
+                    raise MaxServerError(
+                        f"серверная ошибка {status} ({method} {path})",
+                        status_code=status,
+                        url=path,
+                        response_body=body,
+                    )
+                raise MaxAPIError(
+                    f"неожиданный статус {status} ({method} {path})",
+                    status_code=status,
+                    url=path,
+                    response_body=body,
+                )
+
+            except (MaxTransportError, MaxServerError) as exc:
+                # --- 4. Ретраим только транспорт и 5xx. ---
+                last_exc = exc
+                if attempt >= self._max_attempts:
+                    logger.error(
+                        "исчерпаны попытки (%d/%d) для %s %s: %s",
+                        attempt,
+                        self._max_attempts,
+                        method,
+                        path,
+                        exc,
+                    )
+                    raise
+                delay = min(
+                    self._retry_base_delay
+                    * (2 ** (attempt - 1))
+                    * random.uniform(0.8, 1.2),
+                    self._retry_max_delay,
+                )
+                logger.warning(
+                    "попытка %d/%d неудачна (%s %s): %s — повтор через %.2fс",
+                    attempt,
+                    self._max_attempts,
+                    method,
+                    path,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        # Сюда попадаем только если цикл завершился без return и без raise —
+        # теоретически невозможно, но mypy требует явного пути возврата.
+        assert last_exc is not None
+        raise last_exc
 
     async def get_me(self) -> BotInfo:
         """Получить информацию о самом боте — эквивалент "пинга".
