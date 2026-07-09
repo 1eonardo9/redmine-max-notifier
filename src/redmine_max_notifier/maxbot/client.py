@@ -16,6 +16,15 @@ from typing import Self
 
 import httpx
 
+from redmine_max_notifier.maxbot.exceptions import (
+    MaxAPIError,
+    MaxAuthError,
+    MaxNotFoundError,
+    MaxRateLimitError,
+    MaxServerError,
+    MaxTransportError,
+    MaxValidationError,
+)
 from redmine_max_notifier.maxbot.models import (
     BotInfo,
     MessageFormat,
@@ -119,7 +128,11 @@ class MaxClient:
         """Универсальный HTTP-запрос к MAX API.
 
         Все публичные методы клиента должны идти через этот метод — здесь
-        единая точка для логирования, обработки ошибок и (в 2d) ретраев.
+        единая точка для логирования, обработки ошибок и (в 2d.3) ретраев.
+
+        Транспортные ошибки httpx оборачиваются в MaxTransportError,
+        плохие HTTP-статусы — в соответствующие подклассы MaxAPIError.
+        Голый httpx-эксепшн наружу никогда не выходит.
 
         Args:
             method: HTTP-метод ("GET", "POST", ...).
@@ -133,6 +146,15 @@ class MaxClient:
 
         Returns:
             Распарсенный JSON-ответ как словарь.
+
+        Raises:
+            MaxTransportError: сеть/таймаут/TLS.
+            MaxAuthError: 401.
+            MaxNotFoundError: 404.
+            MaxValidationError: 400.
+            MaxRateLimitError: 429.
+            MaxServerError: 5xx.
+            MaxAPIError: любой другой не-2xx статус (например, 405).
         """
         logger.debug("MAX API запрос: %s %s params=%s", method, path, params)
 
@@ -143,19 +165,78 @@ class MaxClient:
             timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT
         )
 
-        response = await self._client.request(
-            method=method,
-            url=path,
-            params=params,
-            json=json,
-            timeout=request_timeout,
-        )
+        # --- 1. HTTP-вызов: транспортные ошибки httpx оборачиваем в наши. ---
+        try:
+            response = await self._client.request(
+                method=method,
+                url=path,
+                params=params,
+                json=json,
+                timeout=request_timeout,
+            )
+        except httpx.TimeoutException as exc:
+            raise MaxTransportError(
+                f"таймаут при запросе {method} {path}",
+                url=path,
+            ) from exc
+        except httpx.TransportError as exc:
+            raise MaxTransportError(
+                f"сетевая ошибка при запросе {method} {path}: {exc}",
+                url=path,
+            ) from exc
 
         logger.debug("MAX API ответ: %s %s -> %d", method, path, response.status_code)
-        response.raise_for_status()
 
-        data: dict[str, object] = response.json()
-        return data
+        # --- 2. Успех: сразу возвращаем распарсенный JSON. ---
+        if 200 <= response.status_code < 300:
+            data: dict[str, object] = response.json()
+            return data
+
+        # --- 3. Ошибка API: маппинг статуса на исключение. ---
+        body = response.text
+        status = response.status_code
+
+        if status == 400:
+            raise MaxValidationError(
+                f"валидация не пройдена ({method} {path}): {body}",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if status == 401:
+            raise MaxAuthError(
+                f"ошибка авторизации {status} для {method} {path}",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if status == 404:
+            raise MaxNotFoundError(
+                f"ресурс не найден: {method} {path}",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if status == 429:
+            raise MaxRateLimitError(
+                f"превышен лимит запросов ({method} {path})",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        if 500 <= status < 600:
+            raise MaxServerError(
+                f"серверная ошибка {status} ({method} {path})",
+                status_code=status,
+                url=path,
+                response_body=body,
+            )
+        raise MaxAPIError(
+            f"неожиданный статус {status} ({method} {path})",
+            status_code=status,
+            url=path,
+            response_body=body,
+        )
 
     async def get_me(self) -> BotInfo:
         """Получить информацию о самом боте — эквивалент "пинга".
