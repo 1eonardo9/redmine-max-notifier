@@ -70,14 +70,14 @@ async def test_send_message_without_format(
     httpx_mock.add_response(
         method="POST",
         url=f"{max_base_url}/messages?chat_id=-12345",
-        json={"body": {"mid": "msg-abc", "seq": 1, "text": "Hello, MAX"}},
+        json={"message": {"body": {"mid": "msg-abc", "seq": 1, "text": "Hello, MAX"}}},
         status_code=200,
     )
 
     sent = await max_client.send_message(chat_id=-12345, text="Hello, MAX")
 
-    assert sent.body.mid == "msg-abc"
-    assert sent.body.seq == 1
+    assert sent.message.body.mid == "msg-abc"
+    assert sent.message.body.seq == 1
 
     # Проверяем содержимое отправленного тела запроса.
     requests = httpx_mock.get_requests()
@@ -98,7 +98,7 @@ async def test_send_message_with_markdown_format(
     httpx_mock.add_response(
         method="POST",
         url=f"{max_base_url}/messages?chat_id=-12345",
-        json={"body": {"mid": "msg-xyz", "seq": 2, "text": "*bold*"}},
+        json={"message": {"body": {"mid": "msg-xyz", "seq": 2, "text": "*bold*"}}},
         status_code=200,
     )
 
