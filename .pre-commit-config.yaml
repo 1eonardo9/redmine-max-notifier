@@ -42,3 +42,19 @@ repos:
         - python-dotenv
         - fastapi
         args: [--config-file=pyproject.toml]
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        # Гоняется только перед git push. На git commit НЕ запускается —
+        # это осознанно: держим commit быстрым, а тесты страхуем на push.
+        entry: uv run pytest
+        language: system
+        # pass_filenames=false: pytest сам решает, что запускать,
+        # список изменённых файлов ему пробрасывать не надо.
+        pass_filenames: false
+        # always_run=true: гонять даже если ни один файл в push не изменился
+        # относительно того, что видит хук (перестраховка).
+        always_run: true
+        stages: [pre-push]
