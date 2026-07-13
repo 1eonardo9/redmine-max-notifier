@@ -19,7 +19,7 @@ repos:
 
   # ─── Ruff: формат + линт ─────────────────────────────────────────────────
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.15.20
     hooks:
       - id: ruff-format              # сначала форматируем
       - id: ruff                     # потом линтим
@@ -40,4 +40,5 @@ repos:
         - pytest-asyncio
         - pytest-httpx
         - python-dotenv
+        - fastapi
         args: [--config-file=pyproject.toml]

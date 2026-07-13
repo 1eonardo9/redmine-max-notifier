@@ -10,9 +10,11 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.139.0",
     "httpx>=0.28.1",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
+    "uvicorn[standard]>=0.51.0",
 ]
 
 [build-system]
@@ -59,6 +61,12 @@ ignore = [
 "tests/**/*.py" = [
     "S101",    # use of assert (в тестах он нужен!)
     "ARG",     # unused arguments (фикстуры pytest часто такие)
+]
+# Smoke-скрипты — одноразовые CLI-разведчики, а не прод-код.
+# Блокирующий pathlib в них допустим: event loop живёт секунды,
+# оптимизировать I/O нет смысла.
+"smoke_*.py" = [
+    "ASYNC240",
 ]
 
 [tool.ruff.lint.isort]
