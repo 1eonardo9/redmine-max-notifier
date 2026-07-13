@@ -34,6 +34,7 @@ repos:
         # Чтобы он видел наши типы, надо явно указать зависимости.
         # Пока их нет — добавим по мере появления (pydantic, httpx и т.д.).
         additional_dependencies:
+        - alembic
         - httpx
         - pydantic
         - pydantic-settings
