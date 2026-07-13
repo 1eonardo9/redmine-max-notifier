@@ -42,6 +42,7 @@ repos:
         - pytest-httpx
         - python-dotenv
         - fastapi
+        - sqlalchemy
         args: [--config-file=pyproject.toml]
 
   - repo: local

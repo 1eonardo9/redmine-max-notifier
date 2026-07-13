@@ -12,18 +12,51 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from redmine_max_notifier.config import Settings
 from redmine_max_notifier.web.app import create_app
 
 
 @pytest.fixture
-def app_instance() -> FastAPI:
+def app_settings() -> Settings:
+    """Settings для тестов: in-memory SQLite.
+
+    'sqlite+aiosqlite:///:memory:' — БД живёт в оперативке процесса,
+    исчезает вместе с engine. Никаких файлов на диске, никаких
+    коллизий между тестами. Каждый create_engine() поднимает свою
+    новую in-memory БД — идеально для изоляции.
+
+    # type: ignore[call-arg] — mypy не знает, что pydantic-settings
+    # умеет брать значения из окружения; передаём напрямую как kwarg
+    # — это разрешённый способ создать Settings в тесте.
+    """
+    return Settings(database_url="sqlite+aiosqlite:///:memory:")
+
+
+@pytest.fixture
+def app_raw(app_settings: Settings) -> FastAPI:
+    """Сырой FastAPI без запущенного lifespan.
+
+    Нужна тестам, которые сами гоняют lifespan_context — иначе
+    получилась бы вложенность 'lifespan внутри lifespan' с двумя
+    engine на один тест. Обычные тесты роутов пусть берут
+    app_instance — там lifespan уже прогнан фикстурой.
+    """
+    return create_app(settings=app_settings)
+
+
+@pytest.fixture
+async def app_instance(app_settings: Settings) -> AsyncIterator[FastAPI]:
     """Свежий экземпляр FastAPI-приложения на каждый тест.
 
-    Собираем через create_app() — так же, как в проде через uvicorn --factory.
-    Свежий инстанс на тест страхует от протечки состояния между тестами
-    (в будущем — app.state с ресурсами вроде БД).
+    Собираем через create_app(settings=...) с in-memory-БД. Проходим
+    полный lifespan вручную через app.router.lifespan_context(app):
+    ASGITransport НЕ прогоняет lifespan (осознанное ограничение httpx),
+    поэтому startup/shutdown зовём сами. Так же тестируем, что engine
+    реально создаётся и корректно закрывается по dispose().
     """
-    return create_app()
+    app = create_app(settings=app_settings)
+    async with app.router.lifespan_context(app):
+        yield app
 
 
 @pytest.fixture

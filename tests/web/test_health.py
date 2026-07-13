@@ -36,26 +36,23 @@ async def test_unknown_path_returns_404(app_client: httpx.AsyncClient) -> None:
 
 
 async def test_lifespan_logs_startup_and_shutdown(
-    app_instance: FastAPI,
+    app_raw: FastAPI,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Lifespan проходит startup и shutdown, каждый пишет в лог.
 
-    ASGITransport в httpx не гоняет lifespan-события — это осознанное
-    ограничение httpx (в тестах роутов lifespan обычно не нужен, и
-    поднимать его на каждый запрос дорого).
-
-    Вход/выход в lifespan-контекст FastAPI прогоняем вручную через
-    app.router.lifespan_context — тот же механизм, что FastAPI
-    использует под капотом при реальном запуске через uvicorn.
+    Берём app_raw (без запущенного lifespan), устанавливаем caplog
+    ДО входа в контекст — иначе startup-лог не будет пойман, — и
+    сами прогоняем полный цикл. Проверяем подстроки, а не точный
+    текст: сообщения могут дополняться (сейчас там уже дописано
+    "инициализация БД" / "закрытие БД"), тест не должен ломаться
+    от косметических правок.
     """
     caplog.set_level(logging.INFO, logger="redmine_max_notifier.web.app")
 
-    async with app_instance.router.lifespan_context(app_instance):
-        # Внутри контекста приложение "запущено" — startup уже прошёл.
+    async with app_raw.router.lifespan_context(app_raw):
         pass
-    # После выхода — shutdown завершён.
 
     messages = [record.message for record in caplog.records]
-    assert "Приложение запускается" in messages
-    assert "Приложение остановлено" in messages
+    assert any("запускается" in m for m in messages)
+    assert any("остановлено" in m for m in messages)
