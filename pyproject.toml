@@ -12,6 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
+    "apscheduler>=3.10,<4",
     "fastapi>=0.139.0",
     "httpx>=0.28.1",
     "jinja2>=3.1.6",
@@ -108,6 +109,14 @@ module = ["tests.*"]
 # В тестах чуть мягче — например, фикстуры с *args/**kwargs
 disallow_untyped_decorators = false
 
+# APScheduler 3.x не поставляется с py.typed и не имеет пакета
+# types-APScheduler на PyPI. Библиотека стабильна и хорошо документирована,
+# но для mypy её содержимое — чёрный ящик. Явно разрешаем импорт без стабов;
+# сигнатуры add_job/start/shutdown стабильные, ловить регрессии от них
+# статически не рассчитываем.
+[[tool.mypy.overrides]]
+module = ["apscheduler.*"]
+ignore_missing_imports = true
 
 [dependency-groups]
 dev = [

@@ -45,6 +45,7 @@ repos:
         - fastapi
         - sqlalchemy
         - jinja2
+        - apscheduler
         args: [--config-file=pyproject.toml]
 
   - repo: local

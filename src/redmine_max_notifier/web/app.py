@@ -22,6 +22,7 @@ from fastapi import FastAPI
 
 from redmine_max_notifier.config import Settings, get_settings
 from redmine_max_notifier.db.engine import create_engine, create_session_factory
+from redmine_max_notifier.scheduler import create_scheduler
 from redmine_max_notifier.web.routes.health import router as health_router
 
 logger = logging.getLogger(__name__)
@@ -31,14 +32,21 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Хук жизненного цикла ASGI-приложения.
 
-    Startup (до yield):
-      - создаём AsyncEngine из Settings, сохраняем в app.state.engine;
-      - создаём фабрику сессий, сохраняем в app.state.session_factory.
+    Startup (до yield), строго в этом порядке:
+      1. создаём AsyncEngine из Settings, сохраняем в app.state.engine;
+      2. создаём фабрику сессий, сохраняем в app.state.session_factory;
+      3. поднимаем AsyncIOScheduler и запускаем его — ПОСЛЕ engine,
+         потому что будущие job'ы поллера будут ходить в БД, и engine
+         обязан быть готов к их первому тику.
 
-    Shutdown (после yield):
-      - вызываем engine.dispose(), чтобы корректно закрыть пул
-        соединений. Без этого на graceful shutdown в логах будет
-        предупреждение о незакрытых ресурсах.
+    Shutdown (после yield), строго в обратном порядке:
+      1. останавливаем scheduler — гасим тех, кто может обращаться
+         к БД, ДО того как БД закроется. wait=False — не блокируемся
+         на завершении текущих job'ов: их нет тяжёлых, а держать
+         graceful shutdown ради минутного heartbeat'а не хочется.
+      2. engine.dispose() — корректно закрываем пул соединений.
+         Без этого uvicorn ругнётся warning'ом на незакрытые
+         ресурсы.
 
     Settings уже лежат в app.state.settings — их туда положила
     фабрика create_app() ДО того, как lifespan запустился. Это важно:
@@ -56,10 +64,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_factory = session_factory
     logger.info("БД инициализирована")
 
+    logger.info("Запуск планировщика фоновых задач")
+    scheduler = create_scheduler()
+    scheduler.start()
+    app.state.scheduler = scheduler
+    logger.info("Планировщик запущен")
+
     try:
         yield
     finally:
-        logger.info("Приложение остановлено, закрытие БД")
+        logger.info("Приложение остановлено, остановка планировщика")
+        scheduler.shutdown(wait=False)
+        logger.info("Закрытие БД")
         await engine.dispose()
 
 
