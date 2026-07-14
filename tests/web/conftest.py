@@ -18,18 +18,27 @@ from redmine_max_notifier.web.app import create_app
 
 @pytest.fixture
 def app_settings() -> Settings:
-    """Settings для тестов: in-memory SQLite.
+    """Settings для тестов: in-memory SQLite + фиктивные внешние сервисы.
 
     'sqlite+aiosqlite:///:memory:' — БД живёт в оперативке процесса,
     исчезает вместе с engine. Никаких файлов на диске, никаких
     коллизий между тестами. Каждый create_engine() поднимает свою
     новую in-memory БД — идеально для изоляции.
 
+    Redmine URL / API-ключ / MAX-токен — с говорящими значениями
+    "do-not-log": если такое просочится в лог настоящего сервиса,
+    сразу будет видно, что это из теста.
+
     # type: ignore[call-arg] — mypy не знает, что pydantic-settings
     # умеет брать значения из окружения; передаём напрямую как kwarg
     # — это разрешённый способ создать Settings в тесте.
     """
-    return Settings(database_url="sqlite+aiosqlite:///:memory:")
+    return Settings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        redmine_url="http://redmine.test.local",
+        redmine_api_key="test-redmine-key-do-not-log",
+        max_token="test-max-token-do-not-log",
+    )
 
 
 @pytest.fixture

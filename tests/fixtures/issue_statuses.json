@@ -1,0 +1,46 @@
+{
+    "issue_statuses": [
+        {
+            "id": 1,
+            "name": "Новая",
+            "is_closed": false,
+            "description": null
+        },
+        {
+            "id": 2,
+            "name": "В работе",
+            "is_closed": false,
+            "description": null
+        },
+        {
+            "id": 3,
+            "name": "Решена",
+            "is_closed": true,
+            "description": ""
+        },
+        {
+            "id": 4,
+            "name": "Нужен отклик",
+            "is_closed": false,
+            "description": null
+        },
+        {
+            "id": 5,
+            "name": "Закрыта",
+            "is_closed": true,
+            "description": null
+        },
+        {
+            "id": 6,
+            "name": "Отклонена",
+            "is_closed": true,
+            "description": null
+        },
+        {
+            "id": 7,
+            "name": "Ожидание",
+            "is_closed": false,
+            "description": ""
+        }
+    ]
+}

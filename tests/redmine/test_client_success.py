@@ -204,3 +204,30 @@ async def test_list_issues_early_break_stops_pagination(
     # Ровно один запрос — потому что break произошёл внутри первой страницы,
     # до того как генератор пошёл за второй.
     assert len(httpx_mock.get_requests()) == 1
+
+
+async def test_list_issue_statuses_success(
+    client: RedmineClient,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """GET /issue_statuses.json → список Status с распарсенными полями."""
+    payload = load_fixture("issue_statuses.json")
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{base_url}/issue_statuses.json",
+        json=payload,
+        status_code=200,
+    )
+
+    statuses = await client.list_issue_statuses()
+
+    assert len(statuses) == 7
+    # Порядок из ответа сохранён — pydantic не переупорядочивает список.
+    assert statuses[0].id == 1
+    assert statuses[0].name == "Новая"
+    assert statuses[0].is_closed is False
+    # Закрытый статус — проверяем, что is_closed корректно парсится в bool.
+    closed = next(s for s in statuses if s.id == 5)
+    assert closed.name == "Закрыта"
+    assert closed.is_closed is True

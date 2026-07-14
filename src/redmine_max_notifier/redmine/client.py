@@ -17,7 +17,7 @@ from redmine_max_notifier.redmine.exceptions import (
     RedmineTransportError,
     RedmineValidationError,
 )
-from redmine_max_notifier.redmine.models import Issue, Journal, User
+from redmine_max_notifier.redmine.models import Issue, Journal, Status, User
 
 log = logging.getLogger(__name__)
 
@@ -323,3 +323,28 @@ class RedmineClient:
             offset += len(issues_data)
             if offset >= total_count:
                 return
+
+    async def list_issue_statuses(
+        self,
+        *,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> list[Status]:
+        """Получить полный список статусов задач Redmine.
+
+        Статусов обычно ~5-15 штук — одна страница, никакой пагинации.
+        Метод предназначен для резолвера "id статуса → name" в поллере:
+        journal-запись Redmine отдаёт только id старого/нового статуса
+        (в details.old_value / details.new_value), а в шаблоне сообщения
+        нужно человекочитаемое имя ("В работе" вместо "2").
+
+        Возвращаемый список свежий на момент запроса — кэширование
+        поверх этого метода делает StatusResolver (этап 7c).
+
+        Endpoint: GET /issue_statuses.json
+
+        Returns:
+            Список Status с полями id, name, is_closed.
+        """
+        data = await self._request("GET", "/issue_statuses.json", timeout=timeout)
+        statuses_data: list[dict[str, Any]] = data["issue_statuses"]
+        return [Status.model_validate(s) for s in statuses_data]
