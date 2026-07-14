@@ -44,6 +44,7 @@ repos:
         - python-dotenv
         - fastapi
         - sqlalchemy
+        - jinja2
         args: [--config-file=pyproject.toml]
 
   - repo: local
