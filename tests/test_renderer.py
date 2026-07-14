@@ -11,7 +11,12 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from redmine_max_notifier.events.models import NewIssueEvent
+from redmine_max_notifier.events.models import (
+    CommentAddedEvent,
+    DueDateApproachingEvent,
+    NewIssueEvent,
+    StatusChangedEvent,
+)
 from redmine_max_notifier.redmine.models import Issue, NamedRef
 from redmine_max_notifier.renderer import MessageRenderer
 
@@ -141,3 +146,144 @@ def test_new_issue_without_description_no_empty_block(
     # Между дедлайном/датой и ссылкой на Redmine — не более
     # одной пустой строки (двух подряд \n).
     assert "\n\n\n" not in result
+
+
+# ──────────────────────────────────────────────────────────────────
+# StatusChangedEvent
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_status_changed_full(renderer: MessageRenderer) -> None:
+    """Обычный случай: и старый, и новый статус известны — стрелка."""
+    event = StatusChangedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=100,
+        old_status_id=1,
+        old_status_name="Новая",
+        new_status_id=2,
+        new_status_name="В работе",
+        changed_by=NamedRef(id=7, name="Иван Иванов"),
+    )
+
+    result = renderer.render(event)
+
+    assert "Статус изменён" in result
+    assert "задача #42" in result
+    assert "Новая" in result
+    assert "В работе" in result
+    assert "→" in result
+    assert "Иван Иванов" in result
+    assert "http://redmine.test/issues/42" in result
+
+
+def test_status_changed_without_old_status(renderer: MessageRenderer) -> None:
+    """Первая смена статуса (нет old_status) — ветка «Статус установлен»."""
+    event = StatusChangedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=100,
+        new_status_id=2,
+        new_status_name="В работе",
+        changed_by=NamedRef(id=7, name="Иван Иванов"),
+    )
+
+    result = renderer.render(event)
+
+    assert "Статус установлен" in result
+    assert "В работе" in result
+    # Стрелка на этой ветке не рисуется — проверяем явно
+    assert "→" not in result
+
+
+# ──────────────────────────────────────────────────────────────────
+# CommentAddedEvent
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_comment_added_short_note(renderer: MessageRenderer) -> None:
+    """Короткий комментарий выводится целиком, без обрезки."""
+    event = CommentAddedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=100,
+        notes="Взял в работу.",
+        author=NamedRef(id=7, name="Иван Иванов"),
+    )
+
+    result = renderer.render(event)
+
+    assert "Новый комментарий" in result
+    assert "Иван Иванов" in result
+    assert "Взял в работу." in result
+    # Многоточия быть не должно — комментарий короткий
+    assert "…" not in result
+
+
+def test_comment_added_long_note_truncated(renderer: MessageRenderer) -> None:
+    """Длинный комментарий обрезается фильтром truncate(500)."""
+    long_note = "Разбираю проблему. " * 100  # ~1900 символов
+    event = CommentAddedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=100,
+        notes=long_note,
+        author=NamedRef(id=7, name="Иван Иванов"),
+    )
+
+    result = renderer.render(event)
+
+    assert "…" in result
+    assert long_note not in result
+
+
+# ──────────────────────────────────────────────────────────────────
+# DueDateApproachingEvent
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_due_date_approaching_future(renderer: MessageRenderer) -> None:
+    """Положительный days_before — «Приближается дедлайн»."""
+    event = DueDateApproachingEvent(
+        occurred_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        issue=_make_issue(due_date=date(2026, 7, 17)),
+        days_before=3,
+    )
+
+    result = renderer.render(event)
+
+    assert "Приближается дедлайн" in result
+    assert "17.07.2026" in result
+    assert "Осталось" in result
+    assert "3 дн." in result
+
+
+def test_due_date_approaching_today(renderer: MessageRenderer) -> None:
+    """days_before == 0 — «Дедлайн сегодня»."""
+    event = DueDateApproachingEvent(
+        occurred_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        issue=_make_issue(due_date=date(2026, 7, 14)),
+        days_before=0,
+    )
+
+    result = renderer.render(event)
+
+    assert "Дедлайн сегодня" in result
+    assert "сегодня последний день" in result
+
+
+def test_due_date_approaching_overdue(renderer: MessageRenderer) -> None:
+    """Отрицательный days_before — «Задача просрочена»."""
+    event = DueDateApproachingEvent(
+        occurred_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        issue=_make_issue(due_date=date(2026, 7, 9)),
+        days_before=-5,
+    )
+
+    result = renderer.render(event)
+
+    assert "просрочена" in result
+    assert "Просрочено на" in result
+    # Минус в шаблоне снимается — показываем «5 дн.», не «-5 дн.»
+    assert "5 дн." in result
+    assert "-5" not in result

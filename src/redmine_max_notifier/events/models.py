@@ -83,7 +83,9 @@ class StatusChangedEvent(EventBase):
     event_type: Literal["status_changed"] = "status_changed"
     journal_id: int
     old_status_id: int | None = None
+    old_status_name: str | None = None
     new_status_id: int
+    new_status_name: str
     changed_by: NamedRef
 
 

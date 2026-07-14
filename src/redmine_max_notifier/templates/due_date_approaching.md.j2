@@ -1,0 +1,22 @@
+{% if event.days_before < 0 %}
+🔴 *Задача просрочена · #{{ event.issue.id }}*
+{% elif event.days_before == 0 %}
+⏰ *Дедлайн сегодня · задача #{{ event.issue.id }}*
+{% else %}
+⚠️ *Приближается дедлайн · задача #{{ event.issue.id }}*
+{% endif %}
+
+*{{ event.issue.subject }}*
+
+*Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') }}
+{% if event.days_before < 0 %}
+*Просрочено на:* {{ -event.days_before }} дн.
+{% elif event.days_before == 0 %}
+*Осталось:* сегодня последний день
+{% else %}
+*Осталось:* {{ event.days_before }} дн.
+{% endif %}
+*Статус:* {{ event.issue.status.name }}
+*Исполнитель:* {% if event.issue.assigned_to %}{{ event.issue.assigned_to.name }}{% else %}не назначено{% endif %}
+
+[Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})

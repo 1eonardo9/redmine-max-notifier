@@ -1,0 +1,14 @@
+🔄 *Статус изменён · задача #{{ event.issue.id }}*
+
+*{{ event.issue.subject }}*
+
+{% if event.old_status_name %}
+*{{ event.old_status_name }}* → *{{ event.new_status_name }}*
+{% else %}
+Статус установлен: *{{ event.new_status_name }}*
+{% endif %}
+
+*Кто:* {{ event.changed_by.name }}
+*Когда:* {{ event.occurred_at.strftime('%d.%m.%Y %H:%M') }}
+
+[Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})

@@ -64,13 +64,17 @@ class TestConstruction:
             issue=sample_issue,
             journal_id=42,
             old_status_id=1,
+            old_status_name="Новая",
             new_status_id=2,
+            new_status_name="В работе",
             changed_by=NamedRef(id=7, name="Иван Петров"),
         )
         assert event.event_type == "status_changed"
         assert event.journal_id == 42
         assert event.old_status_id == 1
+        assert event.old_status_name == "Новая"
         assert event.new_status_id == 2
+        assert event.new_status_name == "В работе"
 
     def test_status_changed_event_allows_no_old_status(
         self, sample_issue: Issue
@@ -81,9 +85,11 @@ class TestConstruction:
             issue=sample_issue,
             journal_id=42,
             new_status_id=2,
+            new_status_name="В работе",
             changed_by=NamedRef(id=7, name="Иван Петров"),
         )
         assert event.old_status_id is None
+        assert event.old_status_name is None
 
     def test_comment_added_event(self, sample_issue: Issue) -> None:
         event = CommentAddedEvent(
@@ -177,12 +183,15 @@ class TestDiscriminatedUnion:
             "event_type": "status_changed",
             "journal_id": 42,
             "old_status_id": 1,
+            "old_status_name": "Новая",
             "new_status_id": 2,
+            "new_status_name": "В работе",
             "changed_by": {"id": 7, "name": "Иван Петров"},
         }
         event = EventAdapter.validate_python(payload)
         assert isinstance(event, StatusChangedEvent)
         assert event.new_status_id == 2
+        assert event.new_status_name == "В работе"
 
     def test_parses_comment_added(self, sample_issue: Issue) -> None:
         payload = {
@@ -228,7 +237,9 @@ class TestDiscriminatedUnion:
             issue=sample_issue,
             journal_id=42,
             old_status_id=1,
+            old_status_name="Новая",
             new_status_id=2,
+            new_status_name="В работе",
             changed_by=NamedRef(id=7, name="Иван Петров"),
         )
         raw = original.model_dump(mode="json")
