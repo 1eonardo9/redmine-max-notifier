@@ -42,7 +42,7 @@ async def main() -> int:
         )
         return 1
 
-    ca_bundle = Path(__file__).resolve().parent / "certs" / "ca_bundle.pem"
+    ca_bundle = Path(__file__).resolve().parent.parent / "certs" / "ca_bundle.pem"
     if not ca_bundle.exists():
         print(f"ERROR: CA-bundle не найден: {ca_bundle}", file=sys.stderr)
         print(

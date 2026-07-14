@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--text",
-        default="Hello, MAX! 👋 (smoke-тест из redmine-max-notifier)",
+        default="Тест отправки сообщения в MAX из Redmine",
         help="Текст сообщения.",
     )
     # Взаимоисключающая группа: markdown ИЛИ html, но не оба.
@@ -109,7 +109,7 @@ async def main() -> int:
         )
         return 1
 
-    ca_bundle = Path(__file__).resolve().parent / "certs" / "ca_bundle.pem"
+    ca_bundle = Path(__file__).resolve().parent.parent / "certs" / "ca_bundle.pem"
     if not ca_bundle.exists():
         print(f"ERROR: CA-bundle не найден: {ca_bundle}", file=sys.stderr)
         print(
