@@ -15,7 +15,7 @@ expire_on_commit=False — важный дефолт для async.
 from __future__ import annotations
 
 import logging
-from _collections_abc import AsyncIterator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

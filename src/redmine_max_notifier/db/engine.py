@@ -57,6 +57,6 @@ def create_session_factory(
     валидными до конца сессии.
     """
     return async_sessionmaker(
-        bing=engine,
+        bind=engine,
         expire_on_commit=False,
     )
