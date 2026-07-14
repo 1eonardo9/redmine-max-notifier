@@ -74,3 +74,4 @@ desktop.ini
 
 # O_o Jupyter maybe maybe
 .ipynb_checkpoints/
+.zed/
