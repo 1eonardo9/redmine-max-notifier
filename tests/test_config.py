@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -33,6 +34,22 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Проставить все обязательные переменные окружения."""
     for key, value in _REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Увести все тесты конфига в пустой каталог, подальше от .env репы.
+
+    Settings ищет .env относительно CWD. Без изоляции тесты читали бы
+    личный .env разработчика: стоит добавить туда REDMINE_BASE_URL_PUBLIC —
+    и тест «по умолчанию пусто» краснеет, хотя код не менялся. Такой тест
+    проверяет не Settings, а содержимое чужого файла, и на CI (где .env
+    нет вовсе) ведёт себя иначе, чем локально.
+    """
+    monkeypatch.chdir(tmp_path)
 
 
 # ── Обязательные поля и базовые сценарии ────────────────────────────────
@@ -70,7 +87,6 @@ def test_settings_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
 )
 def test_settings_raises_when_required_missing(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     missing_var: str,
 ) -> None:
     """Без любого из обязательных полей Settings обязан упасть на старте.
@@ -78,10 +94,10 @@ def test_settings_raises_when_required_missing(
     parametrize прогонит этот же тест четыре раза — по разу на каждое
     обязательное поле. Проверяем, что убрав ЛЮБОЕ из них, получим
     ValidationError с упоминанием имени missed-поля.
+
+    От .env репы тест изолирует фикстура _isolate_from_dotenv, иначе
+    случайный .env "починил" бы отсутствующую переменную.
     """
-    # Уходим в пустую tmp-директорию, чтобы случайный .env из репо не
-    # был подхвачен и не "починил" отсутствующую переменную.
-    monkeypatch.chdir(tmp_path)
     # Проставляем всё, потом убираем ровно одну.
     _set_required_env(monkeypatch)
     monkeypatch.delenv(missing_var, raising=False)
@@ -135,4 +151,43 @@ def test_due_date_job_hour_out_of_range_rejected(
     monkeypatch.setenv("DUE_DATE_JOB_HOUR", "25")
 
     with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+# ── Таймзона ────────────────────────────────────────────────────────────
+
+
+def test_timezone_defaults_to_moscow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Дефолт таймзоны — Europe/Moscow, и он превращается в ZoneInfo."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.timezone == "Europe/Moscow"
+    assert settings.tzinfo == ZoneInfo("Europe/Moscow")
+
+
+def test_timezone_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Таймзона переопределяется через окружение."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("TIMEZONE", "Asia/Yekaterinburg")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.tzinfo == ZoneInfo("Asia/Yekaterinburg")
+
+
+def test_unknown_timezone_rejected_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Опечатка в имени таймзоны роняет сервис на старте.
+
+    Без валидации ZoneInfoNotFoundError вылез бы только при регистрации
+    job'а дедлайнов — то есть про опечатку мы узнали бы из того факта,
+    что напоминания не приходят.
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("TIMEZONE", "Europe/Moskow")  # опечатка
+
+    with pytest.raises(ValidationError, match="неизвестная таймзона"):
         Settings()  # type: ignore[call-arg]

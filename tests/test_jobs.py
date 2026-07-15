@@ -13,6 +13,7 @@ import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from pytest_httpx import HTTPXMock
@@ -30,6 +31,11 @@ from tests.conftest import load_fixture
 
 PROJECT_ID = 5
 CHAT_ID = -1001
+
+# Бизнес-таймзона тестов. Намеренно НЕ таймзона машины, на которой
+# гоняются тесты: job считает "сегодня" именно в ней, и тест обязан
+# проверять это, а не совпадение с локалью разработчика.
+TEST_TZ = ZoneInfo("Europe/Moscow")
 
 SENT_MESSAGE_PAYLOAD = {"message": {"body": {"mid": "msg-1", "seq": 1, "text": "ok"}}}
 
@@ -98,6 +104,7 @@ def deps(
         session_factory=db_session_factory,
         lookback=timedelta(minutes=5),
         due_date_threshold_days=3,
+        tz=TEST_TZ,
     )
 
 
@@ -250,8 +257,8 @@ def _issue_with_due_date(issue_id: int, due_date: str) -> dict[str, Any]:
 
 
 def _local_today() -> date:
-    """Локальная дата сервера — та же, которой оперирует job."""
-    return datetime.now(UTC).astimezone().date()
+    """Дата в бизнес-таймзоне — та же, которой оперирует job."""
+    return datetime.now(TEST_TZ).date()
 
 
 async def test_due_date_reminder_is_sent_once(

@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -56,6 +57,9 @@ class JobDeps:
     session_factory: async_sessionmaker[AsyncSession]
     lookback: timedelta
     due_date_threshold_days: int
+    tz: ZoneInfo
+    """Бизнес-таймзона: в ней решается, какой сегодня день при сравнении
+    с due_date. Явная, а не из ОС, — см. Settings.timezone."""
 
 
 async def run_poll_cycle(deps: JobDeps) -> None:
@@ -123,11 +127,12 @@ async def run_due_date_cycle(deps: JobDeps) -> None:
     вечно.
     """
     try:
-        # Локальная дата сервера, а не UTC: due_date в Redmine — это
-        # календарная дата без времени, живущая в часовом поясе людей,
-        # которые её ставили. В UTC+3 около полуночи now(UTC).date()
-        # отстал бы на сутки и напоминание уехало бы не в тот день.
-        today = datetime.now(UTC).astimezone().date()
+        # Дата в бизнес-таймзоне, а не в UTC и не в таймзоне ОС.
+        # due_date в Redmine — календарная дата без времени, живущая
+        # в часовом поясе людей, которые её ставили. В UTC+3 около
+        # полуночи now(UTC).date() отстал бы на сутки, и напоминание
+        # уехало бы не в тот день.
+        today = datetime.now(deps.tz).date()
         threshold = today + timedelta(days=deps.due_date_threshold_days)
         now = datetime.now(UTC)
 

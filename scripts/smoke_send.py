@@ -10,7 +10,7 @@
     uv run python smoke_send.py --chat-id 443542051 --text "*Хеллоу*, MAX!" --markdown
 
 Переменные окружения (можно положить в .env):
-    MAX_BOT_TOKEN     — токен бота, обязательно.
+    MAX_TOKEN     — токен бота, обязательно.
     MAX_TEST_CHAT_ID  — дефолтный chat_id получателя (int).
                         Может быть перекрыт флагом --chat-id.
 
@@ -96,9 +96,9 @@ async def main() -> int:
 
     args = parse_args()
 
-    token = os.environ.get("MAX_BOT_TOKEN")
+    token = os.environ.get("MAX_TOKEN")
     if not token:
-        print("ERROR: переменная окружения MAX_BOT_TOKEN не задана.", file=sys.stderr)
+        print("ERROR: переменная окружения MAX_TOKEN не задана.", file=sys.stderr)
         return 1
 
     chat_id = resolve_chat_id(args)

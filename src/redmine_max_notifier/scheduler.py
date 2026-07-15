@@ -129,11 +129,10 @@ def register_due_date_job(
 ) -> None:
     """Повесить суточную проверку дедлайнов на планировщик.
 
-    CronTrigger(hour=N, minute=0) — «каждый день в N:00». Часовой пояс
-    не указываем: APScheduler возьмёт локальный пояс сервера, а
-    due_date_job_hour и задуман как «час по местному времени» (9 утра —
-    начало рабочего дня). Прибей мы сюда UTC, на сервере с UTC+3
-    напоминания уезжали бы в 12:00.
+    CronTrigger(hour=N, minute=0, timezone=...) — «каждый день в N:00
+    по бизнес-таймзоне». Таймзону передаём ЯВНО (deps.tz): без неё
+    APScheduler возьмёт таймзону ОС, а прод-серверы принято держать
+    в UTC — «9 утра» тихо превратилось бы в полдень.
 
     misfire_grace_time из job_defaults (30 секунд) для суточного job'а
     строговат: если сервис перезапускали ровно в 9:00, тик пропадёт
@@ -142,11 +141,15 @@ def register_due_date_job(
     """
     scheduler.add_job(
         run_due_date_cycle,
-        trigger=CronTrigger(hour=hour, minute=0),
+        trigger=CronTrigger(hour=hour, minute=0, timezone=deps.tz),
         args=(deps,),
         id="due_date_approaching",
         name="Ежедневная проверка дедлайнов",
         replace_existing=True,
         misfire_grace_time=3600,
     )
-    logger.info("проверка дедлайнов зарегистрирована: ежедневно в %d:00", hour)
+    logger.info(
+        "проверка дедлайнов зарегистрирована: ежедневно в %d:00 (%s)",
+        hour,
+        deps.tz,
+    )

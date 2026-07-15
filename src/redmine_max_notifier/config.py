@@ -9,7 +9,9 @@ DATABASE_URL, токены, адреса внешних сервисов, пар
 
 from __future__ import annotations
 
-from pydantic import Field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -93,10 +95,48 @@ class Settings(BaseSettings):
     # 3 дня — стандартный "предупреждающий" порог.
     due_date_threshold_days: int = Field(default=3, ge=0)
 
-    # В какой час локального времени сервера гонять ежедневное задание
-    # "дедлайны". 9 — начало рабочего дня, свежая почта у людей уже
-    # прочитана, самое время получить напоминание.
+    # В какой час гонять ежедневное задание "дедлайны". 9 — начало
+    # рабочего дня, самое время получить напоминание. Час считается
+    # в таймзоне из поля timezone ниже, а не в таймзоне ОС.
     due_date_job_hour: int = Field(default=9, ge=0, le=23)
+
+    # ── Время ────────────────────────────────────────────────────────────
+    # Бизнес-таймзона сервиса: в ней считается час запуска задания
+    # "дедлайны" и то, какой сегодня день при сравнении с due_date.
+    #
+    # Задаётся ЯВНО, а не берётся из ОС, намеренно. Прод-серверы принято
+    # держать в UTC (логи, БД, отладка), и тогда "9 утра" по местной
+    # таймозне ОС превратилось бы в полдень — молча, без единой ошибки
+    # в логах. Плюс сервер могут пересоздать из другого образа, и TZ
+    # уедет вместе с ним.
+    #
+    # Имя — из базы IANA ("Europe/Moscow", "Asia/Yekaterinburg").
+    # Валидируется на старте: битое имя уронит сервис сразу, а не
+    # через сутки на первом запуске задания.
+    timezone: str = "Europe/Moscow"
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, value: str) -> str:
+        """Проверить, что таймзона существует в базе IANA.
+
+        ZoneInfo кидает ZoneInfoNotFoundError на опечатку вроде
+        "Europe/Moskow". Ловим на старте — иначе узнали бы об этом
+        только когда не пришло напоминание о дедлайне.
+        """
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(
+                f"неизвестная таймзона {value!r}; ожидается имя из базы IANA, "
+                f"например Europe/Moscow"
+            ) from exc
+        return value
+
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        """Таймзона как объект — для CronTrigger и вычисления 'сегодня'."""
+        return ZoneInfo(self.timezone)
 
 
 def get_settings() -> Settings:

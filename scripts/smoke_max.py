@@ -1,9 +1,9 @@
 """Smoke-тест MAX Bot API клиента.
 
 Запуск:
-    MAX_BOT_TOKEN=<твой_токен> uv run python scripts/smoke_max.py
+    MAX_TOKEN=<твой_токен> uv run python scripts/smoke_max.py
 
-Или добавь MAX_BOT_TOKEN в .env файл и подгружай через любой удобный способ
+Или добавь MAX_TOKEN в .env файл и подгружай через любой удобный способ
 (pydantic-settings подключим на Этапе 2g). Пока — просто export переменной.
 
 Скрипт делает GET /me и печатает информацию о боте. Если токен рабочий —
@@ -33,11 +33,11 @@ async def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    token = os.environ.get("MAX_BOT_TOKEN")
+    token = os.environ.get("MAX_TOKEN")
     if not token:
-        print("ERROR: переменная окружения MAX_BOT_TOKEN не задана.", file=sys.stderr)
+        print("ERROR: переменная окружения MAX_TOKEN не задана.", file=sys.stderr)
         print(
-            "Запуск: MAX_BOT_TOKEN=<токен> uv run python scripts/smoke_max.py",
+            "Запуск: MAX_TOKEN=<токен> uv run python scripts/smoke_max.py",
             file=sys.stderr,
         )
         return 1
