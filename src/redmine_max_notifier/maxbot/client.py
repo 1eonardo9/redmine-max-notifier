@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import ssl
 from types import TracebackType
 from typing import Self
 
@@ -75,7 +76,7 @@ class MaxClient:
         *,
         base_url: str = DEFAULT_BASE_URL,
         timeout: httpx.Timeout | None = None,
-        verify: bool | str = True,
+        verify: bool | str | ssl.SSLContext = True,
         max_attempts: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 30.0,
@@ -92,10 +93,14 @@ class MaxClient:
                 Возможные значения:
                 - True — использовать стандартный CA-bundle certifi
                 (подходит для сайтов с сертификатами западных CA).
-                - str — путь к кастомному PEM-файлу с корневыми CA.
+                - ssl.SSLContext — контекст с кастомными корневыми CA.
                 Нужно для MAX API: их сертификат подписан национальным
-                CA Минцифры РФ, которого нет в certifi. Используй
-                scripts/build_ca_bundle.py чтобы собрать расширенный bundle.
+                CA Минцифры РФ, которого нет в certifi. Собирается как
+                ssl.create_default_context(cafile=<путь к bundle>), сам
+                bundle делает scripts/build_ca_bundle.py.
+                - str — путь к PEM-файлу. Оставлен для совместимости
+                со скриптами, но httpx его задепрекейтил: в проде и
+                новом коде передавай SSLContext.
                 - False — отключить верификацию. НЕ ИСПОЛЬЗУЙ В ПРОДЕ,
                 только для отладки в контролируемом окружении.
             max_attempts: максимум попыток на один запрос (первая + ретраи).

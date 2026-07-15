@@ -23,6 +23,8 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from redmine_max_notifier.jobs import PollerDeps, run_poll_cycle
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,3 +86,35 @@ def create_scheduler() -> AsyncIOScheduler:
     )
 
     return scheduler
+
+
+def register_poll_job(
+    scheduler: AsyncIOScheduler,
+    deps: PollerDeps,
+    *,
+    interval_seconds: int,
+) -> None:
+    """Повесить регулярный поллинг Redmine на планировщик.
+
+    Отдельной функцией, а не внутри create_scheduler(): фабрика
+    планировщика не должна знать про клиентов Redmine и MAX, а тестам
+    удобно поднимать голый scheduler без единого похода в сеть.
+
+    Дефолты job'ов из create_scheduler() тут работают на нас:
+    max_instances=1 не даст двум циклам одновременно бодаться за
+    строку polling_state, а coalesce=True схлопнет накопившиеся тики
+    в один, если event loop подвисал.
+
+    Аргумент deps передаём через args — APScheduler вызовет
+    run_poll_cycle(deps). Замыкание тут тоже сработало бы, но так
+    job остаётся обычной функцией, которую видно в jobs.py.
+    """
+    scheduler.add_job(
+        run_poll_cycle,
+        trigger=IntervalTrigger(seconds=interval_seconds),
+        args=(deps,),
+        id="poll_recent_changes",
+        name="Поллинг свежих изменений Redmine",
+        replace_existing=True,
+    )
+    logger.info("поллинг Redmine зарегистрирован: раз в %dс", interval_seconds)
