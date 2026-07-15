@@ -8,6 +8,7 @@ conftest.py ему не нужен.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,7 +19,11 @@ from redmine_max_notifier.events.models import (
     StatusChangedEvent,
 )
 from redmine_max_notifier.redmine.models import Issue, NamedRef
-from redmine_max_notifier.renderer import MessageRenderer, escape_markdown
+from redmine_max_notifier.renderer import (
+    MessageRenderer,
+    escape_markdown,
+    format_datetime,
+)
 
 # Дефолтные NamedRef для фабрики Issue вынесены на уровень модуля:
 # 1) обходит Ruff B008 (call в default-аргументе);
@@ -78,7 +83,9 @@ def test_new_issue_renders_full_message(renderer: MessageRenderer) -> None:
     assert "Тестовая задача" in result
     assert "Иван Иванов" in result
     assert "Пётр Петров" in result
-    assert "14.07.2026 15:30" in result
+    # 15:30 UTC из Redmine показываем как 18:30 по Москве — см.
+    # test_time_is_rendered_in_business_timezone.
+    assert "14.07.2026 18:30" in result
     # rstrip('/') сработал — в ссылке нет двойного слеша перед issues
     assert "http://redmine.test/issues/42" in result
     assert "//issues" not in result
@@ -362,4 +369,62 @@ def test_new_issue_fields_are_on_separate_lines(renderer: MessageRenderer) -> No
 
     assert "*Исполнитель:* не назначено\n" in result
     assert "*Дедлайн:* не установлен\n" in result
-    assert "*Создана:* 14.07.2026 15:30" in result
+    assert "*Создана:* 14.07.2026 18:30" in result
+
+
+# ── Время ───────────────────────────────────────────────────────────────
+
+
+def test_time_is_rendered_in_business_timezone(renderer: MessageRenderer) -> None:
+    """Время события показывается в таймзоне людей, а не в UTC.
+
+    Regression, найденный на живом MAX (7h): Redmine отдаёт время в UTC
+    ("2026-07-15T06:36:32Z"), а шаблон печатал его голым strftime. Человек
+    закрывал задачу в 13:55 и получал уведомление с временем 10:55.
+
+    Тест, который здесь был раньше, ожидал ровно UTC — то есть закреплял
+    баг. Так и живут баги: написанные по коду тесты его охраняют.
+    """
+    event = StatusChangedEvent(
+        occurred_at=datetime(2026, 7, 15, 10, 55, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=60,
+        old_status_id=1,
+        old_status_name="Новая",
+        new_status_id=5,
+        new_status_name="Закрыта",
+        changed_by=NamedRef(id=5, name="Пётр Петров"),
+    )
+
+    result = renderer.render(event)
+
+    assert "15.07.2026 13:55" in result
+    assert "10:55" not in result
+
+
+def test_renderer_respects_configured_timezone() -> None:
+    """Таймзона берётся из конфига, а не прибита к Москве."""
+    renderer = MessageRenderer(
+        redmine_base_url="http://redmine.test",
+        tz=ZoneInfo("Asia/Yekaterinburg"),  # UTC+5
+    )
+    event = NewIssueEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+    )
+
+    result = renderer.render(event)
+
+    assert "14.07.2026 20:30" in result
+
+
+def test_naive_datetime_treated_as_utc() -> None:
+    """naive-время трактуем как UTC, а не как таймзону машины.
+
+    Иначе результат рендера зависел бы от того, где запущен процесс:
+    на ноуте разработчика одно, на сервере в UTC — другое.
+    """
+    assert (
+        format_datetime(datetime(2026, 7, 15, 10, 55), ZoneInfo("Europe/Moscow"))
+        == "15.07.2026 13:55"
+    )

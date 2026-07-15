@@ -92,6 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ходит сервис. Если публичный не задан — берём рабочий.
     renderer = MessageRenderer(
         redmine_base_url=settings.redmine_base_url_public or settings.redmine_url,
+        tz=settings.tzinfo,
     )
 
     app.state.redmine_client = redmine_client

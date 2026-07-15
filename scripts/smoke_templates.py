@@ -169,6 +169,7 @@ async def main() -> int:
     settings = get_settings()
     renderer = MessageRenderer(
         redmine_base_url=settings.redmine_base_url_public or settings.redmine_url,
+        tz=settings.tzinfo,
     )
 
     events = build_events()

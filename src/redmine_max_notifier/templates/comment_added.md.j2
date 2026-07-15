@@ -3,7 +3,7 @@
 *{{ event.issue.subject | md }}*
 
 *Автор:* {{ event.author.name | md }}
-*Когда:* {{ event.occurred_at.strftime('%d.%m.%Y %H:%M') }}
+*Когда:* {{ event.occurred_at | dt }}
 
 {{ event.notes | truncate(500, killwords=False, end='…') | md }}
 

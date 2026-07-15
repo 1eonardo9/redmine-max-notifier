@@ -9,6 +9,6 @@
 {% endif %}
 
 *Кто:* {{ event.changed_by.name | md }}
-*Когда:* {{ event.occurred_at.strftime('%d.%m.%Y %H:%M') }}
+*Когда:* {{ event.occurred_at | dt }}
 
 [Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})
