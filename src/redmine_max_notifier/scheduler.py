@@ -21,9 +21,10 @@ from __future__ import annotations
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from redmine_max_notifier.jobs import PollerDeps, run_poll_cycle
+from redmine_max_notifier.jobs import JobDeps, run_due_date_cycle, run_poll_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
 def register_poll_job(
     scheduler: AsyncIOScheduler,
-    deps: PollerDeps,
+    deps: JobDeps,
     *,
     interval_seconds: int,
 ) -> None:
@@ -118,3 +119,34 @@ def register_poll_job(
         replace_existing=True,
     )
     logger.info("поллинг Redmine зарегистрирован: раз в %dс", interval_seconds)
+
+
+def register_due_date_job(
+    scheduler: AsyncIOScheduler,
+    deps: JobDeps,
+    *,
+    hour: int,
+) -> None:
+    """Повесить суточную проверку дедлайнов на планировщик.
+
+    CronTrigger(hour=N, minute=0) — «каждый день в N:00». Часовой пояс
+    не указываем: APScheduler возьмёт локальный пояс сервера, а
+    due_date_job_hour и задуман как «час по местному времени» (9 утра —
+    начало рабочего дня). Прибей мы сюда UTC, на сервере с UTC+3
+    напоминания уезжали бы в 12:00.
+
+    misfire_grace_time из job_defaults (30 секунд) для суточного job'а
+    строговат: если сервис перезапускали ровно в 9:00, тик пропадёт
+    до завтра. Ставим час — напоминание о дедлайне не протухает от
+    того, что приехало в 9:40.
+    """
+    scheduler.add_job(
+        run_due_date_cycle,
+        trigger=CronTrigger(hour=hour, minute=0),
+        args=(deps,),
+        id="due_date_approaching",
+        name="Ежедневная проверка дедлайнов",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("проверка дедлайнов зарегистрирована: ежедневно в %d:00", hour)

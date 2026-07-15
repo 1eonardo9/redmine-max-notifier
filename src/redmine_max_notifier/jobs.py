@@ -1,11 +1,16 @@
-"""Фоновые задания поллера — то, что реально дёргает APScheduler.
+"""Фоновые задания — то, что реально дёргает APScheduler.
 
-Здесь сходится всё, написанное на 7c-7e: курсор из БД → детектор
-событий → рассылка → новый курсор в БД. Сама по себе логика тонкая,
-это именно оркестрация.
+Здесь сходится всё, написанное на 7c-7e:
 
-Зависимости передаются через PollerDeps, а не берутся из глобалов:
-job'у нужны шесть объектов, живущих столько же, сколько приложение
+- run_poll_cycle — раз в минуту: курсор из БД → детектор событий →
+  рассылка → новый курсор в БД;
+- run_due_date_cycle — раз в сутки: задачи с подходящим дедлайном →
+  рассылка.
+
+Своей логики тут почти нет, это оркестрация.
+
+Зависимости передаются через JobDeps, а не берутся из глобалов:
+job'ам нужны объекты, живущие столько же, сколько приложение
 (клиенты, резолвер, рендерер, фабрика сессий), и собирает их lifespan.
 """
 
@@ -18,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from redmine_max_notifier.dispatcher import dispatch_events
+from redmine_max_notifier.events.models import DueDateApproachingEvent, Event
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.poller import poll_recent_changes
 from redmine_max_notifier.polling_state import load_cursor, save_cursor
@@ -29,13 +35,18 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class PollerDeps:
-    """Долгоживущие зависимости поллер-job'а.
+class JobDeps:
+    """Долгоживущие зависимости фоновых заданий.
 
     Всё это создаётся один раз в lifespan и переиспользуется каждым
     тиком: пересоздавать HTTP-клиент раз в минуту — значит каждый раз
     заново поднимать TLS-сессию, а резолвер вдобавок терял бы кэш
     статусов, ради которого он и написан.
+
+    Один контейнер на оба job'а, хотя каждому нужно не всё (дедлайнам
+    не нужен резолвер статусов, поллингу — порог дедлайна): это
+    зависимости приложения, а не аргументы функции. Два почти
+    одинаковых dataclass'а разъехались бы при первой же правке.
     """
 
     client: RedmineClient
@@ -44,9 +55,10 @@ class PollerDeps:
     max_client: MaxClient
     session_factory: async_sessionmaker[AsyncSession]
     lookback: timedelta
+    due_date_threshold_days: int
 
 
-async def run_poll_cycle(deps: PollerDeps) -> None:
+async def run_poll_cycle(deps: JobDeps) -> None:
     """Один цикл поллинга: найти изменения и разослать их.
 
     Исключения наружу не выпускает. APScheduler переживёт упавший job
@@ -91,3 +103,67 @@ async def run_poll_cycle(deps: PollerDeps) -> None:
         # любое исключение, вылетевшее отсюда, всё равно будет проглочено
         # APScheduler'ом, только уже без нашего контекста.
         log.exception("цикл поллинга завершился ошибкой")
+
+
+async def run_due_date_cycle(deps: JobDeps) -> None:
+    """Напомнить о задачах, у которых поджимает дедлайн.
+
+    Запускается раз в сутки (см. due_date_job_hour). В отличие от
+    поллинга здесь нет курсора: событие вычисляемое, а не найденное
+    в журнале, — «до дедлайна осталось N дней» истинно каждый день,
+    пока задача открыта.
+
+    От ежедневного спама защищает идемпотентность: ключ дедупликации
+    (due_date_approaching, issue_id, NULL) не содержит даты, поэтому
+    напоминание уходит РОВНО ОДИН РАЗ за жизнь задачи. Обратная сторона:
+    если срок передвинули, второго напоминания не будет — событие уже
+    помечено отправленным. Для v1 осознанный размен: одно точное
+    напоминание лучше ежедневной долбёжки.
+
+    Просроченные задачи тоже забираем (фильтр <=, а не диапазон):
+    шаблон умеет days_before < 0, а дедуп не даст напоминать о них
+    вечно.
+    """
+    try:
+        # Локальная дата сервера, а не UTC: due_date в Redmine — это
+        # календарная дата без времени, живущая в часовом поясе людей,
+        # которые её ставили. В UTC+3 около полуночи now(UTC).date()
+        # отстал бы на сутки и напоминание уехало бы не в тот день.
+        today = datetime.now(UTC).astimezone().date()
+        threshold = today + timedelta(days=deps.due_date_threshold_days)
+        now = datetime.now(UTC)
+
+        events: list[Event] = []
+        async for issue in deps.client.list_issues(
+            status_id="open",  # закрытая задача о дедлайне не напоминает
+            due_date=f"<={threshold.isoformat()}",
+        ):
+            if issue.due_date is None:
+                # Фильтр Redmine такого не отдаёт, но шаблон зовёт
+                # due_date.strftime — пусть лучше пропустим, чем уроним
+                # весь цикл на AttributeError.
+                continue
+
+            events.append(
+                DueDateApproachingEvent(
+                    occurred_at=now,
+                    issue=issue,
+                    days_before=(issue.due_date - today).days,
+                )
+            )
+
+        if not events:
+            log.info("проверка дедлайнов: подходящих задач нет")
+            return
+
+        async with deps.session_factory() as session:
+            sent = await dispatch_events(
+                events,
+                session=session,
+                renderer=deps.renderer,
+                max_client=deps.max_client,
+            )
+
+        log.info("проверка дедлайнов: задач %d, напоминаний %d", len(events), sent)
+    except Exception:
+        log.exception("проверка дедлайнов завершилась ошибкой")

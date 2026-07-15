@@ -17,11 +17,15 @@ from fastapi import FastAPI
 
 from redmine_max_notifier.config import Settings, get_settings
 from redmine_max_notifier.db.engine import create_engine, create_session_factory
-from redmine_max_notifier.jobs import PollerDeps
+from redmine_max_notifier.jobs import JobDeps
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.redmine.client import RedmineClient
 from redmine_max_notifier.renderer import MessageRenderer
-from redmine_max_notifier.scheduler import create_scheduler, register_poll_job
+from redmine_max_notifier.scheduler import (
+    create_scheduler,
+    register_due_date_job,
+    register_poll_job,
+)
 from redmine_max_notifier.status_resolver import StatusResolver
 from redmine_max_notifier.web.routes.health import router as health_router
 
@@ -94,19 +98,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.max_client = max_client
 
     logger.info("Запуск планировщика фоновых задач")
+    deps = JobDeps(
+        client=redmine_client,
+        resolver=resolver,
+        renderer=renderer,
+        max_client=max_client,
+        session_factory=session_factory,
+        lookback=timedelta(seconds=settings.polling_lookback_seconds),
+        due_date_threshold_days=settings.due_date_threshold_days,
+    )
     scheduler = create_scheduler()
     register_poll_job(
         scheduler,
-        PollerDeps(
-            client=redmine_client,
-            resolver=resolver,
-            renderer=renderer,
-            max_client=max_client,
-            session_factory=session_factory,
-            lookback=timedelta(seconds=settings.polling_lookback_seconds),
-        ),
+        deps,
         interval_seconds=settings.poll_interval_seconds,
     )
+    register_due_date_job(scheduler, deps, hour=settings.due_date_job_hour)
     scheduler.start()
     app.state.scheduler = scheduler
     logger.info("Планировщик запущен")

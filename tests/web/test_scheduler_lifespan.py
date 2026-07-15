@@ -25,6 +25,7 @@ import logging
 
 import pytest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 
@@ -55,6 +56,34 @@ async def test_heartbeat_job_is_registered(app_raw: FastAPI) -> None:
 
         assert job is not None, "heartbeat job должен быть зарегистрирован"
         assert isinstance(job.trigger, IntervalTrigger)
+
+
+async def test_poll_job_is_registered(app_raw: FastAPI) -> None:
+    """Регулярный поллинг Redmine повешен на планировщик.
+
+    Проверяем именно через lifespan, а не через register_poll_job:
+    сам по себе register_* тестируется тестами jobs, а здесь важно,
+    что lifespan его действительно зовёт. Без этого теста можно
+    выкинуть вызов из lifespan — и весь остальной прогон останется
+    зелёным, а сервис в проде просто не будет ничего слать.
+    """
+    async with app_raw.router.lifespan_context(app_raw):
+        scheduler: AsyncIOScheduler = app_raw.state.scheduler
+        job = scheduler.get_job("poll_recent_changes")
+
+        assert job is not None, "job поллинга должен быть зарегистрирован"
+        assert isinstance(job.trigger, IntervalTrigger)
+
+
+async def test_due_date_job_is_registered(app_raw: FastAPI) -> None:
+    """Суточная проверка дедлайнов повешена на планировщик, и именно
+    на CronTrigger — «в 9 утра», а не «каждые N часов от старта»."""
+    async with app_raw.router.lifespan_context(app_raw):
+        scheduler: AsyncIOScheduler = app_raw.state.scheduler
+        job = scheduler.get_job("due_date_approaching")
+
+        assert job is not None, "job дедлайнов должен быть зарегистрирован"
+        assert isinstance(job.trigger, CronTrigger)
 
 
 async def test_scheduler_is_stopped_after_lifespan(app_raw: FastAPI) -> None:

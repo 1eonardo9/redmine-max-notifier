@@ -1,4 +1,4 @@
-"""Тесты цикла поллинга (run_poll_cycle) и курсора в БД.
+"""Тесты фоновых циклов (run_poll_cycle, run_due_date_cycle) и курсора в БД.
 
 Это самый «интеграционный» уровень юнит-тестов проекта: настоящие БД
 (in-memory SQLite), рендерер и все три модуля 7c-7e, замокан только
@@ -8,16 +8,17 @@ HTTP к Redmine и MAX. Именно здесь ловятся ошибки ст
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
 from pytest_httpx import HTTPXMock
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from redmine_max_notifier.jobs import PollerDeps, run_poll_cycle
+from redmine_max_notifier.jobs import JobDeps, run_due_date_cycle, run_poll_cycle
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.poller import PollCursor
 from redmine_max_notifier.polling_state import load_cursor, save_cursor
@@ -88,14 +89,15 @@ def deps(
     client: RedmineClient,
     max_client: MaxClient,
     db_session_factory: async_sessionmaker[AsyncSession],
-) -> PollerDeps:
-    return PollerDeps(
+) -> JobDeps:
+    return JobDeps(
         client=client,
         resolver=StatusResolver(client, ttl=timedelta(hours=1)),
         renderer=MessageRenderer(redmine_base_url="http://redmine.test.local"),
         max_client=max_client,
         session_factory=db_session_factory,
         lookback=timedelta(minutes=5),
+        due_date_threshold_days=3,
     )
 
 
@@ -134,7 +136,7 @@ async def test_load_cursor_on_empty_db_is_cold_start(
 
 
 async def test_first_cycle_sends_nothing_and_second_sends(
-    deps: PollerDeps,
+    deps: JobDeps,
     base_url: str,
     httpx_mock: HTTPXMock,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -200,7 +202,7 @@ async def test_first_cycle_sends_nothing_and_second_sends(
 
 
 async def test_cycle_survives_redmine_failure(
-    deps: PollerDeps,
+    deps: JobDeps,
     httpx_mock: HTTPXMock,
     db_session_factory: async_sessionmaker[AsyncSession],
     caplog: pytest.LogCaptureFixture,
@@ -232,3 +234,143 @@ async def test_cycle_survives_redmine_failure(
     async with db_session_factory() as session:
         cursor = await load_cursor(session)
     assert cursor.last_seen_issue_id == 200
+
+
+# ── Ежедневная проверка дедлайнов ────────────────────────────────────────
+
+
+def _issue_with_due_date(issue_id: int, due_date: str) -> dict[str, Any]:
+    payload = _issue_payload(
+        issue_id,
+        created_on="2026-07-01T10:00:00Z",
+        updated_on="2026-07-01T10:00:00Z",
+    )
+    payload["due_date"] = due_date
+    return payload
+
+
+def _local_today() -> date:
+    """Локальная дата сервера — та же, которой оперирует job."""
+    return datetime.now(UTC).astimezone().date()
+
+
+async def test_due_date_reminder_is_sent_once(
+    deps: JobDeps,
+    httpx_mock: HTTPXMock,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Напоминание уходит один раз за жизнь задачи.
+
+    Ключ дедупликации (due_date_approaching, issue_id, NULL) не содержит
+    даты — поэтому второй прогон в тот же/следующий день промолчит.
+    Без этого сервис долбил бы напоминанием каждое утро до самого срока.
+    """
+    async with db_session_factory() as session:
+        await add_route(session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+        await session.commit()
+
+    due = (_local_today() + timedelta(days=2)).isoformat()
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*/issues\.json.*"),
+        json={
+            "issues": [_issue_with_due_date(301, due)],
+            "total_count": 1,
+            "offset": 0,
+            "limit": 100,
+        },
+        status_code=200,
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        json=SENT_MESSAGE_PAYLOAD,
+        status_code=200,
+        is_reusable=True,
+    )
+
+    await run_due_date_cycle(deps)
+    await run_due_date_cycle(deps)
+
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 1
+
+
+async def test_due_date_query_asks_only_open_issues_within_threshold(
+    deps: JobDeps,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Запрос к Redmine: только открытые задачи и срок не дальше порога.
+
+    status_id=open — закрытая задача о дедлайне напоминать не должна.
+    Фильтр `<=`, а не диапазон: просроченные тоже забираем, шаблон
+    умеет days_before < 0, а от вечных напоминаний спасает дедуп.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*/issues\.json.*"),
+        json={"issues": [], "total_count": 0, "offset": 0, "limit": 100},
+        status_code=200,
+        is_reusable=True,
+    )
+
+    await run_due_date_cycle(deps)
+
+    params = httpx_mock.get_requests()[0].url.params
+    assert params["status_id"] == "open"
+    expected = (_local_today() + timedelta(days=3)).isoformat()
+    assert params["due_date"] == f"<={expected}"
+
+
+async def test_overdue_issue_gets_negative_days_before(
+    deps: JobDeps,
+    httpx_mock: HTTPXMock,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Просроченная задача даёт days_before < 0 и рендерится шаблоном
+    как «Задача просрочена» — проверяем по тексту, ушедшему в MAX."""
+    async with db_session_factory() as session:
+        await add_route(session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+        await session.commit()
+
+    due = (_local_today() - timedelta(days=5)).isoformat()
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*/issues\.json.*"),
+        json={
+            "issues": [_issue_with_due_date(302, due)],
+            "total_count": 1,
+            "offset": 0,
+            "limit": 100,
+        },
+        status_code=200,
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        json=SENT_MESSAGE_PAYLOAD,
+        status_code=200,
+        is_reusable=True,
+    )
+
+    await run_due_date_cycle(deps)
+
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 1
+    body = json.loads(posts[0].content)
+    assert "просрочена" in body["text"]
+    assert "5 дн." in body["text"]
+
+
+async def test_due_date_cycle_survives_redmine_failure(
+    deps: JobDeps,
+    httpx_mock: HTTPXMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Redmine лежит — суточный job не падает, а логирует."""
+    httpx_mock.add_response(status_code=500, is_reusable=True)
+
+    with caplog.at_level(logging.ERROR):
+        await run_due_date_cycle(deps)
+
+    assert "проверка дедлайнов завершилась ошибкой" in caplog.text
