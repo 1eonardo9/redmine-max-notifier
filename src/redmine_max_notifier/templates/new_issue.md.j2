@@ -2,15 +2,14 @@
 
 *{{ event.issue.subject | md }}*
 
-*Статус:* {{ event.issue.status.name | md }}
-*Приоритет:* {{ event.issue.priority.name | md }}
-*Автор:* {{ event.issue.author.name | md }}
-*Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
-*Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') if event.issue.due_date else 'не установлен' }}
-*Создана:* {{ event.issue.created_on | dt }}
+*Статус:* {{ event.issue.status.name | status_emoji }} {{ event.issue.status.name | md }}
+*Приоритет:* {{ event.issue.priority.name | priority_emoji }} {{ event.issue.priority.name | md }}
+👤 *Автор:* {{ event.issue.author.name | md }}
+👷 *Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
+📅 *Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') if event.issue.due_date else 'не установлен' }}
+🕐 *Создана:* {{ event.issue.created_on | dt }}
 
 {% if event.issue.description %}
-{{ event.issue.description | truncate(300, killwords=False, end='…') | md }}
+📝 {{ event.issue.description | truncate(300, killwords=False, end='…') | md }}
 
 {% endif %}
-[Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})

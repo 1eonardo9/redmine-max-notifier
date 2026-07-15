@@ -8,15 +8,14 @@
 
 *{{ event.issue.subject | md }}*
 
-*Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') }}
+📅 *Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') }}
 {% if event.days_before < 0 %}
-*Просрочено на:* {{ -event.days_before }} дн.
+🔥 *Просрочено на:* {{ -event.days_before }} дн.
 {% elif event.days_before == 0 %}
-*Осталось:* сегодня последний день
+🔥 *Осталось:* сегодня последний день
 {% else %}
-*Осталось:* {{ event.days_before }} дн.
+⏳ *Осталось:* {{ event.days_before }} дн.
 {% endif %}
-*Статус:* {{ event.issue.status.name | md }}
-*Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
-
-[Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})
+*Статус:* {{ event.issue.status.name | status_emoji }} {{ event.issue.status.name | md }}
+*Приоритет:* {{ event.issue.priority.name | priority_emoji }} {{ event.issue.priority.name | md }}
+👷 *Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}

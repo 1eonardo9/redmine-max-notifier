@@ -2,9 +2,7 @@
 
 *{{ event.issue.subject | md }}*
 
-*Автор:* {{ event.author.name | md }}
-*Когда:* {{ event.occurred_at | dt }}
+👤 *Автор:* {{ event.author.name | md }}
+🕐 *Когда:* {{ event.occurred_at | dt }}
 
-{{ event.notes | truncate(500, killwords=False, end='…') | md }}
-
-[Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})
+✅ {{ event.notes | truncate(500, killwords=False, end='…') | md }}

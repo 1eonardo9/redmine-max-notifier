@@ -27,6 +27,59 @@ _DT_FORMAT = "%d.%m.%Y %H:%M"
 # (Ruff B008). ZoneInfo иммутабелен, шарить один экземпляр безопасно.
 _DEFAULT_TZ = ZoneInfo("Europe/Moscow")
 
+# ── Эмодзи статусов и приоритетов ───────────────────────────────────────
+# Маппинг живёт здесь, а не в шаблонах ветками {% if %}: статус
+# упоминается в четырёх местах (new_issue, status_changed дважды,
+# due_date_approaching), и семь статусов превратились бы в 28 веток
+# по четырём файлам. Добавит админ статус — правки в каждом, и
+# «одинаковые эмодзи везде» разъедутся при первой же спешке.
+#
+# Ключи — имена статусов из нашего Redmine (GET /issue_statuses.json),
+# в нижнем регистре. Совпадение по имени, а не по id: id у статусов
+# инсталляционные, и на другом инстансе двойка окажется не «В работе».
+_STATUS_EMOJI: dict[str, str] = {
+    "новая": "🔵",
+    "в работе": "⚙️",
+    "решена": "✅",
+    "нужен отклик": "❓",
+    "закрыта": "🔒",
+    "отклонена": "❌",
+    "ожидание": "⏸️",
+}
+
+# Имена приоритетов из GET /enumerations/issue_priorities.json.
+# Трёхцветная шкала: зелёный — не горит, жёлтый — обычный, красный —
+# требует внимания. Высокий, Срочный и Немедленный намеренно красные:
+# для человека в чате все три означают одно — «бросай и делай».
+_PRIORITY_EMOJI: dict[str, str] = {
+    "низкий": "🟢",
+    "нормальный": "🟡",
+    "высокий": "🔴",
+    "срочный": "🔴",
+    "немедленный": "🔴",
+}
+
+# Фолбэк для незнакомого имени: админ волен завести свой статус или
+# приоритет, и уведомление из-за этого падать или терять эмодзи
+# не должно. Нейтральная метка лучше пустоты — строка не «прыгает».
+_UNKNOWN_STATUS_EMOJI = "📌"
+_UNKNOWN_PRIORITY_EMOJI = "⚪"
+
+
+def status_emoji(name: str | None) -> str:
+    """Эмодзи для имени статуса задачи. Незнакомый статус — нейтральная метка."""
+    if not name:
+        return _UNKNOWN_STATUS_EMOJI
+    return _STATUS_EMOJI.get(name.strip().lower(), _UNKNOWN_STATUS_EMOJI)
+
+
+def priority_emoji(name: str | None) -> str:
+    """Эмодзи для имени приоритета. Незнакомый приоритет — нейтральная метка."""
+    if not name:
+        return _UNKNOWN_PRIORITY_EMOJI
+    return _PRIORITY_EMOJI.get(name.strip().lower(), _UNKNOWN_PRIORITY_EMOJI)
+
+
 # Символы, имеющие смысл в markdown-диалекте MAX. Обратный слеш первым:
 # иначе он экранировал бы уже вставленные нами escape-последовательности.
 _MD_SPECIAL = re.compile(r"([\\*_`\[\]])")
@@ -106,6 +159,9 @@ class MessageRenderer:
         # остаться ни одного голого strftime по datetime: он напечатает
         # UTC, приехавший из Redmine.
         self._env.filters["dt"] = lambda value: format_datetime(value, tz)
+        # Фильтры эмодзи — единый маппинг на все шаблоны, см. выше.
+        self._env.filters["status_emoji"] = status_emoji
+        self._env.filters["priority_emoji"] = priority_emoji
 
     def render(self, event: Event) -> str:
         """Собирает markdown-сообщение по типу события.

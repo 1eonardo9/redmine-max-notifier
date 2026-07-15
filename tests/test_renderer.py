@@ -23,6 +23,8 @@ from redmine_max_notifier.renderer import (
     MessageRenderer,
     escape_markdown,
     format_datetime,
+    priority_emoji,
+    status_emoji,
 )
 
 # Дефолтные NamedRef для фабрики Issue вынесены на уровень модуля:
@@ -40,9 +42,16 @@ def _make_issue(
     description: str | None = "Описание задачи",
     assigned_to: NamedRef | None = _DEFAULT_ASSIGNEE,
     due_date: date | None = None,
+    priority: str = "Нормальный",
 ) -> Issue:
     """Фабрика Issue для тестов. Именованные аргументы обязательны —
-    так вызов теста читается сам по себе."""
+    так вызов теста читается сам по себе.
+
+    Имена статуса и приоритета — реальные из нашего Redmine
+    (GET /issue_statuses.json, /enumerations/issue_priorities.json):
+    от них зависит маппинг эмодзи, и выдуманное "Обычный" вместо
+    "Нормальный" молча дало бы фолбэк вместо цвета.
+    """
     return Issue(
         id=issue_id,
         project=_DEFAULT_PROJECT,
@@ -50,7 +59,7 @@ def _make_issue(
         subject=subject,
         description=description,
         status=NamedRef(id=1, name="Новая"),
-        priority=NamedRef(id=2, name="Обычный"),
+        priority=NamedRef(id=2, name=priority),
         author=NamedRef(id=5, name="Пётр Петров"),
         assigned_to=assigned_to,
         due_date=due_date,
@@ -63,8 +72,12 @@ def _make_issue(
 def renderer() -> MessageRenderer:
     """Один рендерер на тест — Environment собирается один раз,
     инстанс потокобезопасен для читающих операций.
-    Trailing slash в base_url — специально, чтобы проверить,
-    что rstrip('/') в конструкторе реально работает."""
+
+    Ссылку «Открыть в Redmine» из шаблонов убрали (7h, решение Leo:
+    «пока не нужно»), поэтому redmine_base_url сейчас никуда не
+    подставляется. Параметр и Settings.redmine_base_url_public
+    оставлены — «пока» означает, что ссылка может вернуться.
+    """
     return MessageRenderer(redmine_base_url="http://redmine.test/")
 
 
@@ -86,9 +99,6 @@ def test_new_issue_renders_full_message(renderer: MessageRenderer) -> None:
     # 15:30 UTC из Redmine показываем как 18:30 по Москве — см.
     # test_time_is_rendered_in_business_timezone.
     assert "14.07.2026 18:30" in result
-    # rstrip('/') сработал — в ссылке нет двойного слеша перед issues
-    assert "http://redmine.test/issues/42" in result
-    assert "//issues" not in result
 
 
 def test_new_issue_without_assignee_shows_fallback(
@@ -181,7 +191,6 @@ def test_status_changed_full(renderer: MessageRenderer) -> None:
     assert "В работе" in result
     assert "→" in result
     assert "Иван Иванов" in result
-    assert "http://redmine.test/issues/42" in result
 
 
 def test_status_changed_without_old_status(renderer: MessageRenderer) -> None:
@@ -370,6 +379,94 @@ def test_new_issue_fields_are_on_separate_lines(renderer: MessageRenderer) -> No
     assert "*Исполнитель:* не назначено\n" in result
     assert "*Дедлайн:* не установлен\n" in result
     assert "*Создана:* 14.07.2026 18:30" in result
+
+
+# ── Эмодзи статусов и приоритетов ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Новая", "🔵"),
+        ("В работе", "⚙️"),
+        ("Решена", "✅"),
+        ("Нужен отклик", "❓"),
+        ("Закрыта", "🔒"),
+        ("Отклонена", "❌"),
+        ("Ожидание", "⏸️"),
+        # Регистр и пробелы из Redmine не должны ломать маппинг.
+        ("  в РАБОТЕ  ", "⚙️"),
+        # Админ волен завести свой статус — уведомление обязано доехать.
+        ("Согласование с ГИП", "📌"),
+        (None, "📌"),
+    ],
+)
+def test_status_emoji(name: str | None, expected: str) -> None:
+    """Все семь статусов нашего Redmine + фолбэк на незнакомый."""
+    assert status_emoji(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Низкий", "🟢"),
+        ("Нормальный", "🟡"),
+        ("Высокий", "🔴"),
+        ("Срочный", "🔴"),
+        ("Немедленный", "🔴"),
+        ("Свой приоритет", "⚪"),
+        (None, "⚪"),
+    ],
+)
+def test_priority_emoji(name: str | None, expected: str) -> None:
+    """Трёхцветная шкала: зелёный, жёлтый, красный + фолбэк."""
+    assert priority_emoji(name) == expected
+
+
+def test_status_emoji_is_same_across_templates(renderer: MessageRenderer) -> None:
+    """Один статус — одно эмодзи в любом шаблоне.
+
+    Ради этого маппинг и живёт в одном словаре, а не ветками {% if %}
+    по четырём файлам: скопированные ветки разъезжаются при первой
+    же правке, и «Новая» в одном сообщении становится не тем, чем
+    в другом.
+    """
+    issue = _make_issue()
+
+    new_issue = renderer.render(
+        NewIssueEvent(
+            occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC), issue=issue
+        )
+    )
+    status_changed = renderer.render(
+        StatusChangedEvent(
+            occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+            issue=issue,
+            journal_id=1,
+            old_status_id=1,
+            old_status_name="Новая",
+            new_status_id=2,
+            new_status_name="В работе",
+            changed_by=NamedRef(id=5, name="Пётр Петров"),
+        )
+    )
+
+    # У задачи статус "Новая" — в обоих сообщениях он помечен одинаково.
+    assert "🔵 Новая" in new_issue
+    assert "🔵 *Новая*" in status_changed
+    assert "⚙️ *В работе*" in status_changed
+
+
+def test_priority_emoji_in_new_issue(renderer: MessageRenderer) -> None:
+    """Приоритет в сообщении помечен цветом."""
+    event = NewIssueEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(priority="Высокий"),
+    )
+
+    result = renderer.render(event)
+
+    assert "*Приоритет:* 🔴 Высокий" in result
 
 
 # ── Время ───────────────────────────────────────────────────────────────
