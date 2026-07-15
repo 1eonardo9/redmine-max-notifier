@@ -176,6 +176,14 @@ MAX_CA_BUNDLE_PATH=/opt/redmine-max-notifier/certs/ca_bundle.pem
 следить, что в логе регулярно появляется `цикл поллинга:` — молчание
 дольше нескольких минут означает, что фоновые задания встали.
 
+## Шпаргалки
+
+Памятки по эксплуатации — в [cheatsheets/](cheatsheets/):
+[routing](cheatsheets/routing.md) (проект → чат),
+[@упоминания](cheatsheets/mentions.md) (где взять ID, как сопоставить людей),
+[шаблоны](cheatsheets/templates.md) (правка и проверка в чате),
+[эксплуатация](cheatsheets/operations.md) (запуск, миграции, диагностика).
+
 ## Разработка
 
 ```bash

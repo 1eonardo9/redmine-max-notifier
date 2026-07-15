@@ -19,3 +19,7 @@
 *Статус:* {{ event.issue.status.name | status_emoji }} {{ event.issue.status.name | md }}
 *Приоритет:* {{ event.issue.priority.name | priority_emoji }} {{ event.issue.priority.name | md }}
 👷 *Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
+{% if mentions %}
+
+👉 {{ mentions | join(' ') }}
+{% endif %}

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from pytest_httpx import HTTPXMock
@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from redmine_max_notifier.dispatcher import dispatch_events
 from redmine_max_notifier.events.models import (
     CommentAddedEvent,
+    DueDateApproachingEvent,
     Event,
     NewIssueEvent,
     StatusChangedEvent,
@@ -59,6 +60,12 @@ def _issue(issue_id: int = 101) -> Issue:
 
 def _new_issue_event(issue_id: int = 101) -> NewIssueEvent:
     return NewIssueEvent(occurred_at=OCCURRED_AT, issue=_issue(issue_id))
+
+
+def _issue_with_due_date(issue_id: int = 102) -> Issue:
+    """Задача со сроком — для событий о дедлайне (шаблон зовёт
+    due_date.strftime, без срока упадёт)."""
+    return _issue(issue_id).model_copy(update={"due_date": date(2026, 7, 17)})
 
 
 def _comment_event(journal_id: int = 501) -> CommentAddedEvent:
@@ -312,6 +319,37 @@ async def test_many_mentions_for_one_assignee(
     text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
     assert "[Петя](max://user/111)" in text
     assert "[Вася](max://user/222)" in text
+
+
+async def test_due_date_reminder_mentions_assignee(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Напоминание о дедлайне тоже пингует исполнителя.
+
+    Здесь пинг ценнее всего: смысл напоминания в том, чтобы человек
+    его увидел, а не пролистал в общем потоке.
+    """
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(
+        db_session,
+        redmine_user_id=ASSIGNEE_ID,
+        max_user_id=252123521,
+        max_name="Leonid",
+    )
+    event = DueDateApproachingEvent(
+        occurred_at=OCCURRED_AT,
+        issue=_issue_with_due_date(),
+        days_before=2,
+    )
+
+    sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "[Leonid](max://user/252123521)" in text
 
 
 async def test_unmapped_assignee_sends_without_mention(

@@ -46,7 +46,7 @@ from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.maxbot.exceptions import MaxError
 from redmine_max_notifier.maxbot.models import MessageFormat
 from redmine_max_notifier.redmine.models import Issue, NamedRef
-from redmine_max_notifier.renderer import MessageRenderer
+from redmine_max_notifier.renderer import MessageRenderer, format_mention
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
@@ -197,6 +197,20 @@ async def main() -> int:
         action="store_true",
         help="Только напечатать markdown в консоль, в MAX не слать.",
     )
+    parser.add_argument(
+        "--mention-user-id",
+        type=int,
+        help=(
+            "Добавить @упоминание в шаблоны, которые его поддерживают "
+            "(new_issue, due_date_approaching). ID берётся из "
+            "user_mapping_cli.py max-members."
+        ),
+    )
+    parser.add_argument(
+        "--mention-name",
+        default="Исполнитель",
+        help="Подпись упоминания (по умолчанию 'Исполнитель').",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -208,9 +222,20 @@ async def main() -> int:
     events = build_events()
     selected = events if args.event == "all" else {args.event: events[args.event]}
 
+    # Упоминания приходят в render извне (их резолвит диспетчер из БД),
+    # поэтому здесь подставляем вручную — иначе в dry-run их не увидеть.
+    mentions = (
+        [format_mention(args.mention_user_id, args.mention_name)]
+        if args.mention_user_id
+        else []
+    )
+
     # Сначала рендерим всё: если шаблон битый, лучше упасть до отправки,
     # чем половину сообщений отправить, а на второй половине развалиться.
-    rendered = {name: renderer.render(event) for name, event in selected.items()}
+    rendered = {
+        name: renderer.render(event, mentions=mentions)
+        for name, event in selected.items()
+    }
 
     for name, text in rendered.items():
         print(f"\n{'=' * 60}\n{name}\n{'=' * 60}")
