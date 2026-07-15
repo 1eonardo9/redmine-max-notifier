@@ -8,88 +8,111 @@
 
 ## Где мы сейчас
 
-**Последний коммит `main`:** SHA-хэш добавляю после пуша 7b — сейчас
-это коммит с сообщением `feat(scheduler): APScheduler в lifespan +
-heartbeat-job` (подэтап 7b).
+**Последний коммит `feature/claude-code-migration`:** `e35f4fd`
+`feat(poller): StatusResolver — TTL-кэш "id статуса → имя"` (подэтап 7c).
 
 **Текущий этап:** 7. Поллер и детектор событий.
-**Закрыто в этапе 7:** ✅ 7a, ✅ 7b.
-**В работе:** 🔜 **7c** — `StatusResolver`.
+**Закрыто в этапе 7:** ✅ 7a, ✅ 7b, ✅ 7c.
+**В работе:** 🔜 **7d** — чистый детектор `poll_recent_changes`.
 
 ---
 
-## Задача подэтапа 7c
+## Что закрыто в 7c (итог)
 
-Собрать `StatusResolver` — небольшой кэш «id статуса → имя статуса»
-с TTL. Нужен поллеру: событие `StatusChangedEvent` должно содержать
-готовые `old_status_name / new_status_name` до того, как попадёт
-в рендер (см. якорь 4.8 в CLAUDE.md — резолв делает поллер, а не
-шаблонизатор).
+`StatusResolver` в `src/redmine_max_notifier/status_resolver.py`:
+TTL-кэш «id статуса → имя», обновляется целиком, свежесть меряется
+`time.monotonic()`, конкурентные промахи схлопываются в один HTTP-запрос
+через `asyncio.Lock` + двойную проверку внутри лока.
+
+Принятые решения (чтобы не переобсуждать):
+
+- **`monotonic`, не `datetime.now()`** — настенные часы прыгают (NTP,
+  перевод времени) и ломают арифметику TTL.
+- **Ошибка Redmine при протухшем кэше → исключение наружу**, stale-значение
+  НЕ отдаём. Молча подставленное старое имя маскирует недоступность
+  Redmine; решение «ловить или падать» принимает поллер (7f).
+- **Промах по свежему кэшу → сразу `None`, без рефреша.** Иначе событие
+  с удалённым статусом било бы по API на каждом проходе. Реально новый
+  статус подтянется по истечении TTL.
+
+---
+
+## Задача подэтапа 7d
+
+Чистый детектор изменений — сердце этапа 7:
+
+```python
+async def poll_recent_changes(
+    client: RedmineClient,
+    resolver: StatusResolver,
+    since: datetime,
+    lookback: timedelta,
+) -> tuple[list[Event], datetime]: ...
+```
+
+Без БД, без отправки, без APScheduler. На вход — «когда смотрели
+в прошлый раз», на выход — список доменных событий и новая отметка
+времени. Такую функцию легко тестировать: чистый вход → чистый выход.
 
 ### Что нужно сделать
 
-1. Класс `StatusResolver` — асинхронный (метод `resolve(status_id)`
-   есть await, потому что при промахе кеша идёт HTTP-вызов).
-2. Хранилище кеша — `dict[int, str]` + timestamp последнего обновления.
-3. TTL берётся из `Settings.status_cache_ttl_seconds` (уже добавлено
-   в 7a, default 3600).
-4. При промахе или истечении TTL — вызов `client.list_issue_statuses()`
-   и обновление кеша целиком (не поштучно — API возвращает все статусы
-   одним запросом).
-5. Юнит-тесты на моках Redmine через pytest-httpx.
-
-### Целевой API (примерно)
-
-```python
-class StatusResolver:
-    def __init__(
-        self,
-        client: RedmineClient,
-        ttl: timedelta,
-    ) -> None: ...
-
-    async def resolve(self, status_id: int) -> str | None: ...
-```
-
-Возвращает `None`, если статус не найден в Redmine (защита от
-«удалили статус, но событие с ним пришло по journal»).
+1. Запрос свежих задач: `client.list_issues(updated_on=">=...", include=["journals"], sort="updated_on:desc")`.
+   Окно = `since - lookback` (см. `polling_lookback_seconds`, якорь:
+   дубли режет идемпотентность на 7e, пропуски — нет, поэтому окно
+   расширяем).
+2. Классификация:
+   - `created_on` внутри окна → `NewIssueEvent`;
+   - journal с `details[].name == "status_id"` → `StatusChangedEvent`
+     (`old_value`/`new_value` — **строки**, резолвим через `resolver`);
+   - journal с непустыми `notes` → `CommentAddedEvent`.
+   - Одна journal-запись может дать **и** статус, **и** комментарий —
+     это два разных события.
+3. Новая отметка времени — обсудить на входе (см. ниже).
 
 ### Тонкости для обсуждения на входе
 
-- **Гонка при инвалидации.** Если два корутина одновременно
-  промахнулись — оба пойдут в HTTP? Или ставим `asyncio.Lock`?
-  Правильный ответ — Lock (иначе будет N параллельных обновлений
-  кеша). Обсудим при коде.
-- **`resolve` возвращает `str | None` или бросает исключение?**
-  Склоняюсь к `str | None`, потому что «не нашли статус» — не
-  ошибка приложения, а бизнес-факт (поллер решает, что делать).
+- **Что возвращать как `new_state`?** Максимальный `updated_on` среди
+  увиденных задач или «время начала опроса»? Первое — не пропустим
+  события при отставании часов Redmine, второе — проще. Склоняюсь
+  к первому, с фолбэком на второе при пустом ответе.
+- **`DueDateApproachingEvent` здесь НЕ трогаем** — это 7g, отдельный
+  ежедневный job.
+- **Приватные journal-записи** (`private_notes=True`) — шлём или нет?
+  Склоняюсь к «не шлём»: приватный комментарий не должен утекать
+  в общий чат проекта.
 
 ---
 
-## Whitelist файлов для 7c
+## Whitelist файлов для 7d
 
 Читаешь только то, что тут перечислено. Ничего лишнего.
 
 ### Читать (существующий код)
 
-- `src/redmine_max_notifier/config.py` — оттуда `status_cache_ttl_seconds`.
-- `src/redmine_max_notifier/redmine/client.py` — метод
-  `list_issue_statuses()` (добавлен в 7a).
-- `src/redmine_max_notifier/redmine/models.py` — модель `Status`.
-- `tests/fixtures/issue_statuses.json` — эталон ответа Redmine для мока.
-- `tests/redmine/conftest.py` — паттерн фикстур для тестов клиента.
+- `src/redmine_max_notifier/events/models.py` — доменные события
+  и `EventAdapter`. **Главный файл подэтапа.**
+- `src/redmine_max_notifier/redmine/models.py` — `Issue`, `Journal`,
+  `JournalDetail` (структура `details` — ключевая для классификации).
+- `src/redmine_max_notifier/redmine/client.py` — сигнатура `list_issues`
+  (фильтры, пагинация).
+- `src/redmine_max_notifier/status_resolver.py` — API резолвера.
+- `src/redmine_max_notifier/config.py` — `polling_lookback_seconds`.
+- `tests/conftest.py` — фикстуры `client` / `base_url` / `load_fixture`.
+- `tests/fixtures/issue_with_journals.json` — эталон задачи с журналами.
 
 ### Создать (новые файлы)
 
-- `src/redmine_max_notifier/status_resolver.py` — сам класс.
-- `tests/redmine/test_status_resolver.py` — юнит-тесты.
+- `src/redmine_max_notifier/poller.py` — `poll_recent_changes`.
+- `tests/test_poller.py` — юнит-тесты детектора.
+- Возможно, новые фикстуры в `tests/fixtures/` — по реальным ответам
+  Redmine, не по догадкам (якорь 4.12).
 
 ### НЕ трогаем в этом подэтапе
 
-- `web/app.py` — интеграция в lifespan будет только на 7f, когда
-  появится реальный поллер.
-- `db/*` — резолвер не ходит в БД.
-- `maxbot/*`, `renderer/*`, `routing/*` — вообще другая область.
+- `db/*` — детектор чистый, состояние ему передают аргументом.
+  `PollingState` подключим на 7f.
+- `maxbot/*`, `renderer.py`, `routing.py` — отправка это 7e.
+- `scheduler.py`, `web/app.py` — интеграция это 7f.
 
 ---
 
@@ -98,6 +121,30 @@ class StatusResolver:
 Свежие наблюдения. Когда этап закроется целиком и «повторяющаяся»
 грабля себя не проявит ещё пару этапов — переносим её в `CLAUDE.md`
 или просто удаляем.
+
+- **Async-тест на мгновенном моке не проверяет конкурентность.**
+  Тест «пять корутин промахнулись → один HTTP-запрос» был зелёным даже
+  с выломанной двойной проверкой в `StatusResolver._refresh`. Причина:
+  `httpx_mock.add_response` отвечает без реальной точки переключения,
+  первая корутина проходит весь `_refresh`, ни разу не отдав управление
+  event loop'у, остальные стартуют уже на заполненном кэше и до lock'а
+  не доходят. Запрос один — но по другой причине. Лечится
+  `httpx_mock.add_callback(...)` с `await asyncio.sleep(0.02)` внутри
+  (+ `is_reusable=True`, иначе второй запрос упадёт раньше assert'а).
+  **Мораль:** написал async-тест на гонку — выломай фичу и убедись,
+  что он краснеет. Зелёный тест сам по себе не доказательство.
+  См. `tests/redmine/test_status_resolver.py`.
+
+- **`check.sh` не видит untracked-файлы.** pre-commit ходит только по
+  файлам, известным git'у. Новый файл, не прошедший `git add`, ruff/mypy
+  **не проверяют** — `check.sh` зелёный, а `git commit` тут же краснеет
+  (поймали на E501 в `status_resolver.py`). Перед `check.sh` на новых
+  файлах — сначала `git add`.
+
+- **Часы в тестах не мокаются глобально.** `time.monotonic` — общий
+  с event loop'ом, который меряет им свои таймеры. Заморозишь через
+  monkeypatch — `asyncio.sleep` не проснётся никогда. В тестах TTL берём
+  микроскопический (0.05с) и спим по-настоящему.
 
 - **`AsyncIOScheduler.shutdown()` — асинхронный по факту.** Метод
   декорирован `@run_in_event_loop`, реальный переход в
@@ -137,9 +184,10 @@ class StatusResolver:
   `issue_statuses.json` с живого Redmine.
 - ✅ **7b.** APScheduler 3.x + `scheduler.py` (фабрика + heartbeat) +
   интеграция в lifespan (start после engine, shutdown до dispose).
-- 🔜 **7c.** `StatusResolver` — TTL-кэш «id → имя». **← мы здесь**
-- ⏭️ **7d.** Чистый детектор `poll_recent_changes(client, state, resolver)
-  → (events, new_state)` — без БД, без отправки.
+- ✅ **7c.** `StatusResolver` — TTL-кэш «id → имя» (lock + double-check,
+  monotonic, 7 тестов).
+- 🔜 **7d.** Чистый детектор `poll_recent_changes(client, state, resolver)
+  → (events, new_state)` — без БД, без отправки. **← мы здесь**
 - ⏭️ **7e.** Идемпотентность (`is_already_sent` / `mark_sent`) +
   диспетчер отправки (событие → рендер → routing → MAX).
 - ⏭️ **7f.** Регулярный job поллера через APScheduler (собирает
