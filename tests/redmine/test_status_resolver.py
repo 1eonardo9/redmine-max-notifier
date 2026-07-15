@@ -28,8 +28,14 @@ from tests.conftest import load_fixture
 LONG_TTL = timedelta(hours=1)
 
 # TTL, который истекает за время короткого sleep'а.
+#
+# Зазор между TTL и сном — четырёхкратный, и это не паранойя:
+# гранулярность системного таймера в Windows ~15.6мс, поэтому
+# asyncio.sleep(0.06) просыпается где-то между 0.046 и 0.078.
+# С зазором в 10мс тест флакует — сон иногда заканчивается ДО
+# истечения TTL, кэш законно остаётся свежим, и проверка падает.
 SHORT_TTL = timedelta(seconds=0.05)
-SHORT_TTL_ELAPSED = 0.06
+SHORT_TTL_ELAPSED = 0.2
 
 
 def test_rejects_non_positive_ttl(client: RedmineClient) -> None:

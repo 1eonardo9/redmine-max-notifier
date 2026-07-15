@@ -16,12 +16,15 @@ updated_on берётся с запасом lookback, а цикл крутитс
 
 from __future__ import annotations
 
+from datetime import date
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from redmine_max_notifier.db.models import SentNotification
 from redmine_max_notifier.events.models import (
     CommentAddedEvent,
+    DueDateApproachingEvent,
     Event,
     StatusChangedEvent,
 )
@@ -42,6 +45,17 @@ def journal_id_of(event: Event) -> int | None:
     return None
 
 
+def notified_due_date_of(event: Event) -> date | None:
+    """Срок, о котором напоминаем, — только для событий про дедлайн.
+
+    Часть ключа дедупликации: без него напоминание уходило бы один раз
+    за жизнь задачи, и сдвиг срока сервис бы проигнорировал.
+    """
+    if isinstance(event, DueDateApproachingEvent):
+        return event.issue.due_date
+    return None
+
+
 async def is_already_sent(session: AsyncSession, event: Event) -> bool:
     """Мы про этот факт уже писали в чат?
 
@@ -56,6 +70,10 @@ async def is_already_sent(session: AsyncSession, event: Event) -> bool:
     `column == None` в IS NULL: полагаться на перегрузку оператора при
     None-значении переменной — значит требовать от читателя знания этой
     магии, чтобы понять, работает ли дедуп new_issue вообще.
+
+    Для due_date_approaching в ключ добавляется ещё и сам срок, иначе
+    напоминание ушло бы один раз за жизнь задачи и сдвиг срока остался
+    бы незамеченным (см. notified_due_date в db/models.py).
     """
     journal_id = journal_id_of(event)
 
@@ -68,6 +86,10 @@ async def is_already_sent(session: AsyncSession, event: Event) -> bool:
         if journal_id is None
         else SentNotification.journal_id == journal_id
     )
+
+    due_date = notified_due_date_of(event)
+    if due_date is not None:
+        stmt = stmt.where(SentNotification.notified_due_date == due_date)
 
     result = await session.execute(stmt.limit(1))
     return result.scalar_one_or_none() is not None
@@ -89,6 +111,7 @@ async def mark_sent(session: AsyncSession, event: Event) -> SentNotification:
         event_type=event.event_type,
         issue_id=event.issue.id,
         journal_id=journal_id_of(event),
+        notified_due_date=notified_due_date_of(event),
     )
     session.add(notification)
     # flush отправляет INSERT в БД, но не коммитит: id становится

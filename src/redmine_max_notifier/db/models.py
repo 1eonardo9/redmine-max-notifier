@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import DateTime, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -94,6 +94,23 @@ class SentNotification(Base):
     # id записи журнала (для status_changed / comment_added).
     # None для new_issue и due_date_approaching.
     journal_id: Mapped[int | None] = mapped_column(default=None)
+
+    # Срок, о котором напоминали. Заполняется ТОЛЬКО для
+    # due_date_approaching, у остальных типов событий None.
+    #
+    # Зачем отдельная колонка. Ключ (event_type, issue_id, journal_id)
+    # для дедлайнов вырождается в (due_date_approaching, issue_id, NULL) —
+    # даты в нём нет, поэтому напоминание ушло бы РОВНО ОДИН РАЗ за жизнь
+    # задачи. Сдвинули срок с 15.07 на 30.07 — про новый срок сервис бы
+    # промолчал, причём чем важнее задача (её и двигают), тем вероятнее
+    # про неё замолчать.
+    #
+    # С этой колонкой дедуп работает на пару (задача, срок): одно
+    # напоминание на каждое значение due_date. В UniqueConstraint её НЕ
+    # добавляем — там она бесполезна ровно по той же причине, по которой
+    # бесполезен journal_id: NULL != NULL (якорь 4.10). Дедуп держится
+    # на явном SELECT в sent_notifications.is_already_sent.
+    notified_due_date: Mapped[date | None] = mapped_column(default=None)
 
     # Момент отправки. timezone=True — колонка TIMESTAMP WITH TIME ZONE
     # в PostgreSQL, в SQLite фактически хранится как ISO-строка с tz.

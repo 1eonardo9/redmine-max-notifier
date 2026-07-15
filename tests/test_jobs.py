@@ -296,6 +296,64 @@ async def test_due_date_reminder_is_sent_once(
     assert len(posts) == 1
 
 
+async def test_moved_due_date_triggers_new_reminder(
+    deps: JobDeps,
+    httpx_mock: HTTPXMock,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Срок передвинули — про новый срок напоминаем заново.
+
+    Ключ дедупа включает notified_due_date, поэтому (задача, срок №1)
+    и (задача, срок №2) — разные факты. Без этой колонки чем важнее
+    задача (её и двигают), тем вероятнее сервис бы про неё замолчал
+    навсегда.
+    """
+    async with db_session_factory() as session:
+        await add_route(session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+        await session.commit()
+
+    httpx_mock.add_response(
+        method="POST",
+        json=SENT_MESSAGE_PAYLOAD,
+        status_code=200,
+        is_reusable=True,
+    )
+
+    first_due = (_local_today() + timedelta(days=2)).isoformat()
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*/issues\.json.*"),
+        json={
+            "issues": [_issue_with_due_date(303, first_due)],
+            "total_count": 1,
+            "offset": 0,
+            "limit": 100,
+        },
+        status_code=200,
+    )
+
+    await run_due_date_cycle(deps)
+
+    # Срок сдвинули на неделю вперёд — и он снова попал в порог.
+    moved_due = (_local_today() + timedelta(days=1)).isoformat()
+    httpx_mock.add_response(
+        method="GET",
+        url=re.compile(r".*/issues\.json.*"),
+        json={
+            "issues": [_issue_with_due_date(303, moved_due)],
+            "total_count": 1,
+            "offset": 0,
+            "limit": 100,
+        },
+        status_code=200,
+    )
+
+    await run_due_date_cycle(deps)
+
+    posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert len(posts) == 2, "про новый срок должно прийти отдельное напоминание"
+
+
 async def test_due_date_query_asks_only_open_issues_within_threshold(
     deps: JobDeps,
     httpx_mock: HTTPXMock,
