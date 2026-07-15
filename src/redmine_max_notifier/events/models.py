@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from redmine_max_notifier.redmine.models import Issue, NamedRef
 
@@ -92,18 +92,48 @@ class StatusChangedEvent(EventBase):
 
 
 class CommentAddedEvent(EventBase):
-    """Добавлен новый комментарий к задаче.
+    """К задаче добавили комментарий и/или прикрепили файл.
 
-    Детектируется как journal с непустым notes.
+    Детектируется как journal с непустым notes ЛИБО с вложениями.
+
+    Почему одно событие на два случая. Для Redmine прикрепление файла —
+    это запись в details, а текст комментария — notes, и человек в UI
+    делает это одним действием: пишет пару слов и цепляет схему. Для
+    читателя чата это тоже один факт («к задаче добавили информацию»),
+    поэтому разводить на два события и два сообщения незачем.
     """
 
     event_type: Literal["comment_added"] = "comment_added"
     journal_id: int
-    notes: str = Field(min_length=1)
-    """Текст комментария. Пустой notes — это не комментарий, а чистое
-    изменение атрибутов, такой journal сюда не должен доходить."""
+
+    notes: str = ""
+    """Текст комментария. Может быть пустым: файл прикрепляют и молча."""
+
+    attachments: list[str] = Field(default_factory=list)
+    """Имена прикреплённых файлов.
+
+    Только имена, без ссылок: content_url в Redmine требует авторизации,
+    и в чате она у людей может не сработать. Имени достаточно, чтобы
+    понять, что появилось.
+    """
 
     author: NamedRef
+
+    @model_validator(mode="after")
+    def _require_content(self) -> CommentAddedEvent:
+        """Событие обязано нести хоть что-то для людей.
+
+        Пустой notes без вложений — это чистая смена атрибутов (статус,
+        исполнитель), про которую есть свои события. Такой journal сюда
+        доходить не должен, и лучше поймать это ValidationError'ом при
+        сборке события, чем отправить в чат пустое сообщение.
+        """
+        if not self.notes and not self.attachments:
+            raise ValueError(
+                "comment_added требует либо notes, либо attachments: "
+                "пустая запись журнала — это не комментарий"
+            )
+        return self
 
 
 class DueDateApproachingEvent(EventBase):

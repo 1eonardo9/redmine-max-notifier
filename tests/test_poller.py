@@ -343,6 +343,144 @@ async def test_one_journal_yields_status_and_comment(
     assert comment.author.id == 42
 
 
+def _attachment_detail(attachment_id: str, filename: str) -> dict[str, Any]:
+    """Так Redmine пишет прикрепление файла — проверено на живом API."""
+    return {
+        "property": "attachment",
+        "name": attachment_id,
+        "old_value": None,
+        "new_value": filename,
+    }
+
+
+async def test_attachment_without_notes_yields_event(
+    client: RedmineClient,
+    resolver: StatusResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Файл прикрепили молча — событие всё равно есть.
+
+    Redmine пишет вложение в details, а не в notes. Пока событие
+    требовало непустой notes, такой journal пропадал: человек цеплял
+    схему к аварийной задаче, и в чат не уходило ничего (поймано
+    на живом Redmine, 7h).
+    """
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                200,
+                created_on="2025-01-01T10:00:00Z",
+                updated_on=_dt(1),
+                journals=[
+                    _journal(
+                        501,
+                        created_on=_dt(1),
+                        notes="",
+                        details=[_attachment_detail("5", "i.webp")],
+                    )
+                ],
+            )
+        ],
+    )
+
+    events, _ = await poll_recent_changes(
+        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, CommentAddedEvent)
+    assert event.notes == ""
+    assert event.attachments == ["i.webp"]
+
+
+async def test_removed_attachment_is_not_reported_as_added(
+    client: RedmineClient,
+    resolver: StatusResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Удаление файла Redmine пишет теми же details, но имя в old_value.
+
+    Без фильтра по new_value «удалил схему» приехало бы в чат как
+    «приложил схему».
+    """
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                200,
+                created_on="2025-01-01T10:00:00Z",
+                updated_on=_dt(1),
+                journals=[
+                    _journal(
+                        501,
+                        created_on=_dt(1),
+                        notes="",
+                        details=[
+                            {
+                                "property": "attachment",
+                                "name": "5",
+                                "old_value": "i.webp",
+                                "new_value": None,
+                            }
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+
+    events, _ = await poll_recent_changes(
+        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+    )
+
+    assert events == []
+
+
+async def test_private_note_hides_attachments_too(
+    client: RedmineClient,
+    resolver: StatusResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Приватная заметка прячет и файлы, приложенные к ней.
+
+    Имя файла выдаёт содержание не хуже текста ("договор_с_ценами.pdf"),
+    поэтому приватную запись пропускаем целиком.
+    """
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                200,
+                created_on="2025-01-01T10:00:00Z",
+                updated_on=_dt(1),
+                journals=[
+                    _journal(
+                        501,
+                        created_on=_dt(1),
+                        notes="только для своих",
+                        private_notes=True,
+                        details=[_attachment_detail("5", "договор_с_ценами.pdf")],
+                    )
+                ],
+            )
+        ],
+    )
+
+    events, _ = await poll_recent_changes(
+        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+    )
+
+    assert events == []
+
+
 async def test_private_notes_skip_comment_but_keep_status(
     client: RedmineClient,
     resolver: StatusResolver,

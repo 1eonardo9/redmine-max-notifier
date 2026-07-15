@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
 from redmine_max_notifier.events.models import (
     CommentAddedEvent,
@@ -379,6 +380,68 @@ def test_new_issue_fields_are_on_separate_lines(renderer: MessageRenderer) -> No
     assert "*Исполнитель:* не назначено\n" in result
     assert "*Дедлайн:* не установлен\n" in result
     assert "*Создана:* 14.07.2026 18:30" in result
+
+
+# ── Вложения ────────────────────────────────────────────────────────────
+
+
+def test_comment_with_attachments(renderer: MessageRenderer) -> None:
+    """Комментарий с файлами: и текст, и имена файлов."""
+    event = CommentAddedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=62,
+        notes="Приложил схему.",
+        attachments=["ЗУ Штиль.JPG", "схема_трассы.pdf"],
+        author=NamedRef(id=7, name="Иван Иванов"),
+    )
+
+    result = renderer.render(event)
+
+    assert "Новый комментарий" in result
+    assert "Приложил схему." in result
+    assert "ЗУ Штиль.JPG" in result
+    # Имена файлов — тоже текст от людей: подчёркивание экранируется.
+    assert r"схема\_трассы.pdf" in result
+
+
+def test_attachment_without_notes_changes_header(renderer: MessageRenderer) -> None:
+    """Файл без единого слова — заголовок про файл, а не про комментарий.
+
+    До 7h такой journal вообще не доезжал: событие требовало непустой
+    notes, а Redmine пишет вложение в details. Прикрепил схему к
+    аварийной задаче — и тишина.
+    """
+    event = CommentAddedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=61,
+        attachments=["i.webp"],
+        author=NamedRef(id=7, name="Иван Иванов"),
+    )
+
+    result = renderer.render(event)
+
+    assert "Прикреплён файл" in result
+    assert "Новый комментарий" not in result
+    assert "i.webp" in result
+    # Пустого блока текста быть не должно
+    assert "\n\n\n" not in result
+
+
+def test_comment_event_requires_content() -> None:
+    """Ни текста, ни файлов — событие собрать нельзя.
+
+    Пустая запись журнала — это чистая смена атрибутов, про неё есть
+    свои события. Ловим на модели, а не отправляем пустое сообщение.
+    """
+    with pytest.raises(ValidationError, match="требует либо notes"):
+        CommentAddedEvent(
+            occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+            issue=_make_issue(),
+            journal_id=61,
+            author=NamedRef(id=7, name="Иван Иванов"),
+        )
 
 
 # ── Эмодзи статусов и приоритетов ───────────────────────────────────────

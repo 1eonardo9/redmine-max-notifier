@@ -119,6 +119,39 @@ def build_events() -> dict[str, Event]:
             ),
             author=MAKSIM,
         ),
+        # Комментарий с файлами: имена намеренно с пробелами и
+        # подчёркиванием — подчёркивание в markdown это разметка.
+        "comment_with_files": CommentAddedEvent(
+            occurred_at=NOW,
+            issue=_issue(),
+            journal_id=62,
+            notes="Приложил схему трассы и фото кросса.",
+            attachments=["ЗУ Штиль.JPG", "схема_трассы_v2.pdf"],
+            author=MAKSIM,
+        ),
+        # Файл без единого слова — до 7h такое молча не доезжало.
+        "file_only": CommentAddedEvent(
+            occurred_at=NOW,
+            issue=_issue(),
+            journal_id=61,
+            attachments=["i.webp"],
+            author=MAKSIM,
+        ),
+        # Таблица в комментарии: Redmine их умеет, MAX — нет.
+        # Смотрим, во что превращается.
+        "comment_with_table": CommentAddedEvent(
+            occurred_at=NOW,
+            issue=_issue(),
+            journal_id=63,
+            notes=(
+                "Замеры по портам:\r\n\r\n"
+                "|Порт |Затухание |\r\n"
+                "|--|--|\r\n"
+                "|gi0/1 |0.3 dB |\r\n"
+                "|gi0/2 |31.7 dB |\r\n"
+            ),
+            author=MAKSIM,
+        ),
         "due_date_approaching": DueDateApproachingEvent(
             occurred_at=NOW,
             issue=_issue(

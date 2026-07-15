@@ -1,8 +1,18 @@
+{% if event.notes %}
 💬 *Новый комментарий · задача #{{ event.issue.id }}*
+{% else %}
+📎 *Прикреплён файл · задача #{{ event.issue.id }}*
+{% endif %}
 
 *{{ event.issue.subject | md }}*
 
 👤 *Автор:* {{ event.author.name | md }}
 🕐 *Когда:* {{ event.occurred_at | dt }}
 
+{% if event.notes %}
 ✅ {{ event.notes | truncate(500, killwords=False, end='…') | md }}
+
+{% endif %}
+{% if event.attachments %}
+📎 *Файлы:* {{ event.attachments | map('md') | join(', ') }}
+{% endif %}

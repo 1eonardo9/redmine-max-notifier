@@ -276,17 +276,40 @@ async def _events_from_journal(
         if status_event is not None:
             events.append(status_event)
 
-    # private_notes прячет ТОЛЬКО текст заметки — изменения атрибутов
-    # из той же записи Redmine показывает всем. Поэтому фильтр висит
-    # на комментарии, а не на записи целиком: приватный текст в общий
-    # чат проекта не уедет, а смена статуса рядом с ним — придёт.
-    if journal.notes and not journal.private_notes:
+    # private_notes прячет заметку целиком — и текст, и приложенные
+    # к ней файлы. Имя файла само по себе выдаёт содержание не хуже
+    # текста ("договор_с_ценами.pdf"), так что приватную запись
+    # пропускаем полностью.
+    #
+    # На смену статуса из той же записи это не влияет: она разбирается
+    # выше и уходит как отдельное событие. Redmine показывает details
+    # приватной записи всем — приватен именно комментарий.
+    if journal.private_notes:
+        return events
+
+    # Прикрепление файла Redmine пишет в details, а не в notes:
+    # property="attachment", name=<id вложения>, new_value=<имя файла>.
+    # Удаление файла выглядит так же, но имя лежит в old_value —
+    # поэтому фильтр по new_value, иначе "удалил схему" приехало бы
+    # в чат как "приложил схему".
+    attachments = [
+        d.new_value
+        for d in journal.details
+        if d.property == "attachment" and d.new_value
+    ]
+    notes = journal.notes or ""
+
+    # Файл без единого слова — тоже событие: прикрепили схему к аварийной
+    # задаче, и об этом стоит знать. До 7h такой journal молча пропадал,
+    # потому что событие требовало непустой notes.
+    if notes or attachments:
         events.append(
             CommentAddedEvent(
                 occurred_at=journal.created_on,
                 issue=issue,
                 journal_id=journal.id,
-                notes=journal.notes,
+                notes=notes,
+                attachments=attachments,
                 author=journal.user,
             )
         )
