@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -30,9 +31,11 @@ from redmine_max_notifier.redmine.models import Issue, NamedRef
 from redmine_max_notifier.renderer import MessageRenderer
 from redmine_max_notifier.routing import add_route
 from redmine_max_notifier.sent_notifications import is_already_sent, mark_sent
+from redmine_max_notifier.user_mapping import add_mapping
 
 PROJECT_ID = 5
 CHAT_ID = -1001
+ASSIGNEE_ID = 10  # id исполнителя в Redmine
 OCCURRED_AT = datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
 
 # Ответ MAX на POST /messages.
@@ -47,6 +50,7 @@ def _issue(issue_id: int = 101) -> Issue:
         status=NamedRef(id=1, name="Новая"),
         priority=NamedRef(id=2, name="Normal"),
         author=NamedRef(id=42, name="Leo Test"),
+        assigned_to=NamedRef(id=ASSIGNEE_ID, name="Максим Мерзляков"),
         subject="DHCP conflict on redmine host",
         created_on=OCCURRED_AT,
         updated_on=OCCURRED_AT,
@@ -259,6 +263,75 @@ async def test_one_failing_chat_does_not_block_others(
     assert sent == 1
     assert await is_already_sent(db_session, event) is True
     assert f"в чат {CHAT_ID}" in caplog.text
+
+
+async def test_assignee_is_mentioned(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Исполнитель сопоставлен с MAX — в сообщение уходит @упоминание.
+
+    Формат ссылки проверен на живом MAX: `@username` подсвечивается
+    только у ботов, у живых людей поля username нет.
+    """
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(
+        db_session,
+        redmine_user_id=ASSIGNEE_ID,
+        max_user_id=252123521,
+        max_name="Leonid",
+    )
+
+    sent = await _dispatch([_new_issue_event()], db_session, renderer, max_client)
+
+    assert sent == 1
+    body = json.loads(mock_max_ok.get_requests()[0].content)
+    assert "[Leonid](max://user/252123521)" in body["text"]
+
+
+async def test_many_mentions_for_one_assignee(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Один Redmine-исполнитель может дёргать нескольких в MAX
+    (например, самого исполнителя и его тимлида)."""
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(
+        db_session, redmine_user_id=ASSIGNEE_ID, max_user_id=111, max_name="Петя"
+    )
+    await add_mapping(
+        db_session, redmine_user_id=ASSIGNEE_ID, max_user_id=222, max_name="Вася"
+    )
+
+    await _dispatch([_new_issue_event()], db_session, renderer, max_client)
+
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "[Петя](max://user/111)" in text
+    assert "[Вася](max://user/222)" in text
+
+
+async def test_unmapped_assignee_sends_without_mention(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Исполнителя не сопоставили — уведомление всё равно уходит.
+
+    Подрядчик, уволившийся, робот-учётка: отсутствие маппинга не повод
+    лишать чат уведомления.
+    """
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+
+    sent = await _dispatch([_new_issue_event()], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "max://user/" not in text
 
 
 async def test_mark_is_committed_per_event(

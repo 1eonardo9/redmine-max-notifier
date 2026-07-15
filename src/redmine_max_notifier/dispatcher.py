@@ -15,6 +15,7 @@ sent_notifications.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,9 +23,10 @@ from redmine_max_notifier.events.models import Event
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.maxbot.exceptions import MaxError
 from redmine_max_notifier.maxbot.models import MessageFormat
-from redmine_max_notifier.renderer import MessageRenderer
+from redmine_max_notifier.renderer import MessageRenderer, format_mention
 from redmine_max_notifier.routing import list_chats_for_project
 from redmine_max_notifier.sent_notifications import is_already_sent, mark_sent
+from redmine_max_notifier.user_mapping import list_max_users_for_redmine
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +86,9 @@ async def dispatch_events(
             )
             continue
 
-        if await _deliver(event, chat_ids, renderer, max_client):
+        mentions = await _resolve_mentions(session, event)
+
+        if await _deliver(event, chat_ids, renderer, max_client, mentions):
             await mark_sent(session, event)
             await session.commit()
             sent_count += 1
@@ -92,11 +96,35 @@ async def dispatch_events(
     return sent_count
 
 
+async def _resolve_mentions(session: AsyncSession, event: Event) -> list[str]:
+    """Собрать @упоминания для исполнителя задачи.
+
+    Кого пинговать — свойство доставки, а не факт из Redmine, поэтому
+    резолвим здесь, а не в детекторе: маппинг лежит в БД, а детектор
+    мы держим чистым от неё (7d).
+
+    Упоминаем только исполнителя: это тот, кому задача «прилетела».
+    Автор и так знает, что создал задачу.
+
+    Пустой список — норма: человека не сопоставили с MAX (или не
+    сопоставят никогда — подрядчик, уволился), уведомление уйдёт без
+    пинга. Молчать про это в логах тоже правильно: иначе каждый цикл
+    сыпал бы warning'ами про одних и тех же людей.
+    """
+    assignee = event.issue.assigned_to
+    if assignee is None:
+        return []
+
+    max_users = await list_max_users_for_redmine(session, assignee.id)
+    return [format_mention(u.user_id, u.name) for u in max_users]
+
+
 async def _deliver(
     event: Event,
     chat_ids: list[int],
     renderer: MessageRenderer,
     max_client: MaxClient,
+    mentions: Sequence[str] = (),
 ) -> bool:
     """Отправить событие во все чаты проекта.
 
@@ -109,7 +137,7 @@ async def _deliver(
     удалён или бота из него выкинули — это не повод лишать уведомления
     другие чаты того же проекта.
     """
-    text = renderer.render(event)
+    text = renderer.render(event, mentions=mentions)
     delivered = False
 
     for chat_id in chat_ids:

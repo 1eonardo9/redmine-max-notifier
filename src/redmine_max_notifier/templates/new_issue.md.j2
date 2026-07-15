@@ -13,3 +13,6 @@
 📝 {{ event.issue.description | truncate(300, killwords=False, end='…') | md }}
 
 {% endif %}
+{% if mentions %}
+👉 {{ mentions | join(' ') }}
+{% endif %}

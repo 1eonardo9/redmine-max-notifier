@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -102,6 +103,30 @@ def escape_markdown(value: object) -> str:
     return _MD_SPECIAL.sub(r"\\\1", str(value))
 
 
+# В тексте ссылки экранируем только то, что ломает саму ссылку:
+# квадратные скобки закрывают [...] раньше времени, обратный слеш
+# съедает следующий символ. Звёздочки и подчёркивания внутри подписи
+# упоминания безобидны, а лишние escape-последовательности в имени
+# выглядят мусором.
+_LINK_TEXT_SPECIAL = re.compile(r"([\\\[\]])")
+
+
+def format_mention(user_id: int, name: str) -> str:
+    """Собрать @упоминание пользователя MAX.
+
+    Формат проверен экспериментом на живом MAX (этап 9): для людей
+    работает только markdown-ссылка со схемой max://user/<id>.
+    `@username` подсвечивается лишь у ботов — у живых пользователей
+    поля username попросту нет.
+
+    Экранирование здесь своё, не `| md`: тот экранирует `[` и `]`
+    вместе со звёздочками, и ссылка развалилась бы на первом же
+    символе.
+    """
+    safe_name = _LINK_TEXT_SPECIAL.sub(r"\\\1", name)
+    return f"[{safe_name}](max://user/{user_id})"
+
+
 def format_datetime(value: datetime, tz: ZoneInfo) -> str:
     """Показать время события в таймзоне людей, а не в UTC.
 
@@ -163,19 +188,30 @@ class MessageRenderer:
         self._env.filters["status_emoji"] = status_emoji
         self._env.filters["priority_emoji"] = priority_emoji
 
-    def render(self, event: Event) -> str:
+    def render(self, event: Event, mentions: Sequence[str] = ()) -> str:
         """Собирает markdown-сообщение по типу события.
+
         Имя шаблона выводится напрямую из event.event_type:
         "new_issue" → "new_issue.md.j2". Если файла нет —
         Jinja поднимет TemplateNotFound, что означает
         «поллер прислал событие, для которого забыли шаблон».
         Ловить это исключение здесь не будем: это программерская
         ошибка, а не runtime-ситуация — пусть падает громко.
+
         В контекст кладём само событие под именем "event". Шаблон
         обращается к полям как event.issue.subject, event.notes и т.д.
         StrictUndefined гарантирует, что опечатка в имени поля
         превратится в UndefinedError при рендере, а не в пустую строку.
+
+        Args:
+            mentions: готовые @упоминания (см. format_mention).
+                Приходят снаружи, а не из события: кого пинговать —
+                это свойство доставки в конкретный мессенджер, а не
+                факт из Redmine. Событие «задача назначена на Максима»
+                истинно независимо от того, есть ли у Максима MAX.
+                Резолвит их диспетчер — маппинг живёт в БД, а рендерер
+                про БД не знает.
         """
         template_name = f"{event.event_type}.md.j2"
         template = self._env.get_template(template_name)
-        return template.render(event=event).strip()
+        return template.render(event=event, mentions=list(mentions)).strip()
