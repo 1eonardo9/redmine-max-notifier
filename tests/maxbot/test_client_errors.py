@@ -18,7 +18,7 @@ from redmine_max_notifier.maxbot.exceptions import (
     MaxServerError,
     MaxValidationError,
 )
-from tests.maxbot.conftest import TEST_TOKEN
+from tests.conftest import TEST_TOKEN
 
 # ---------- 400 -> MaxValidationError --------------------------------------
 

@@ -15,7 +15,7 @@ from pytest_httpx import HTTPXMock
 
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.maxbot.models import MessageFormat
-from tests.maxbot.conftest import TEST_TOKEN
+from tests.conftest import TEST_TOKEN
 
 # Готовый payload ответа GET /me — используем в нескольких тестах.
 # Timestamp: 1_720_000_000_000 мс = 2024-07-03 11:06:40 UTC.
