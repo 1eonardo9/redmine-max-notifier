@@ -20,11 +20,16 @@ Documentation=https://github.com/1eonardo9/redmine-max-notifier
 After=network-online.target
 Wants=network-online.target
 
-; Если сервис живёт на одной машине с Redmine — раскомментируй строку
-; с именем юнита Redmine. Это не обязательно (сервис переживёт лежащий
-; Redmine: цикл поллинга ловит исключения и повторит через минуту),
-; но убирает пачку бессмысленных ошибок в логе при перезагрузке.
-; After=redmine.service
+; Redmine живёт на этой же машине, но в Docker (образ redmine:6, порт 80
+; хоста проброшен в 3000 контейнера). Отдельного redmine.service не
+; существует — контейнеры поднимает docker.service, поэтому цепляемся
+; за него.
+;
+; Строка убирает пачку бессмысленных ошибок в логе при перезагрузке, но
+; НЕ гарантирует готовность Redmine: docker-демон стартует за секунды,
+; а Rails внутри контейнера поднимается ещё десятки секунд. Это и не
+; нужно — цикл поллинга ловит исключения и повторит через минуту.
+After=docker.service
 
 [Service]
 Type=simple
@@ -78,7 +83,12 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+; AF_UNIX нужен не нашему коду, а glibc: резолвинг имён ходит в
+; systemd-resolved (или nscd) через unix-сокет. Без него DNS до
+; platform-api2.max.ru держится на фолбэке в /etc/resolv.conf — сработает
+; или нет, зависит от хоста. Дешевле разрешить, чем ловить плавающее
+; "иногда не резолвится".
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
