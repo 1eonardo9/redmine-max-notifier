@@ -1,10 +1,10 @@
 💬 *Новый комментарий · задача #{{ event.issue.id }}*
 
-*{{ event.issue.subject }}*
+*{{ event.issue.subject | md }}*
 
-*Автор:* {{ event.author.name }}
+*Автор:* {{ event.author.name | md }}
 *Когда:* {{ event.occurred_at.strftime('%d.%m.%Y %H:%M') }}
 
-{{ event.notes | truncate(500, killwords=False, end='…') }}
+{{ event.notes | truncate(500, killwords=False, end='…') | md }}
 
 [Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})

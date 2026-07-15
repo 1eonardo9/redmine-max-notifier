@@ -1,0 +1,87 @@
+; systemd-unit сервиса redmine-max-notifier.
+;
+; Установка:
+;   sudo cp deploy/redmine-max-notifier.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now redmine-max-notifier
+;
+; Подробности и подготовка окружения — README, раздел "Деплой".
+;
+; Комментарии в unit-файлах — английские директивы + русские пояснения:
+; systemd читает только строки без ";" в начале.
+
+[Unit]
+Description=Redmine -> MAX notifier
+Documentation=https://github.com/1eonardo9/redmine-max-notifier
+
+; network-online, а не network: сервису нужен не поднятый интерфейс,
+; а работающая сеть — на старте он резолвит адрес Redmine и собирает
+; TLS-контекст для MAX.
+After=network-online.target
+Wants=network-online.target
+
+; Если сервис живёт на одной машине с Redmine — раскомментируй строку
+; с именем юнита Redmine. Это не обязательно (сервис переживёт лежащий
+; Redmine: цикл поллинга ловит исключения и повторит через минуту),
+; но убирает пачку бессмысленных ошибок в логе при перезагрузке.
+; After=redmine.service
+
+[Service]
+Type=simple
+
+; Отдельный системный пользователь, без шелла и без прав на свой код.
+; Создать: sudo useradd --system --no-create-home --shell /usr/sbin/nologin redmine-notifier
+User=redmine-notifier
+Group=redmine-notifier
+
+; Код. Владелец — root, сервис его только читает: скомпрометированный
+; сервис не должен уметь переписать собственные исходники.
+WorkingDirectory=/opt/redmine-max-notifier
+
+; Секреты вне рабочего дерева: .env рядом с кодом переживает git pull
+; ровно до первого конфликта, а в бэкап каталога уезжает вместе с ним.
+; Права: sudo chown root:redmine-notifier /etc/redmine-max-notifier/env
+;        sudo chmod 640 /etc/redmine-max-notifier/env
+EnvironmentFile=/etc/redmine-max-notifier/env
+
+; StateDirectory создаст /var/lib/redmine-max-notifier с нужным владельцем
+; и сам добавит его в ReadWritePaths. Именно сюда должен указывать
+; DATABASE_URL — под ProtectSystem=strict больше писать некуда.
+StateDirectory=redmine-max-notifier
+
+ExecStart=/opt/redmine-max-notifier/.venv/bin/uvicorn \
+    --factory redmine_max_notifier.web.app:create_app \
+    --host 127.0.0.1 \
+    --port 8000
+
+; Сеть моргнула на старте, Redmine ещё не поднялся, битый путь к
+; CA-bundle поправили — сервис вернётся сам.
+Restart=on-failure
+RestartSec=10s
+
+; SIGINT, а не SIGTERM: uvicorn по SIGINT делает graceful shutdown и
+; отрабатывает lifespan (гасит scheduler, закрывает клиентов и БД).
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+; Логи уезжают в journald: journalctl -u redmine-max-notifier -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=redmine-max-notifier
+
+; ── Ограничение прав ────────────────────────────────────────────────
+; Сервису нужны ровно две вещи: исходящая сеть и своя БД.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

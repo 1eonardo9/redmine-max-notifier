@@ -1,16 +1,16 @@
 🆕 *Новая задача #{{ event.issue.id }}*
 
-*{{ event.issue.subject }}*
+*{{ event.issue.subject | md }}*
 
-*Статус:* {{ event.issue.status.name }}
-*Приоритет:* {{ event.issue.priority.name }}
-*Автор:* {{ event.issue.author.name }}
-*Исполнитель:* {% if event.issue.assigned_to %}{{ event.issue.assigned_to.name }}{% else %}не назначено{% endif %}
-*Дедлайн:* {% if event.issue.due_date %}{{ event.issue.due_date.strftime('%d.%m.%Y') }}{% else %}не установлен{% endif %}
+*Статус:* {{ event.issue.status.name | md }}
+*Приоритет:* {{ event.issue.priority.name | md }}
+*Автор:* {{ event.issue.author.name | md }}
+*Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
+*Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') if event.issue.due_date else 'не установлен' }}
 *Создана:* {{ event.issue.created_on.strftime('%d.%m.%Y %H:%M') }}
 
 {% if event.issue.description %}
-{{ event.issue.description | truncate(300, killwords=False, end='…') }}
+{{ event.issue.description | truncate(300, killwords=False, end='…') | md }}
 
 {% endif %}
 [Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})

@@ -1,14 +1,14 @@
 🔄 *Статус изменён · задача #{{ event.issue.id }}*
 
-*{{ event.issue.subject }}*
+*{{ event.issue.subject | md }}*
 
 {% if event.old_status_name %}
-*{{ event.old_status_name }}* → *{{ event.new_status_name }}*
+*{{ event.old_status_name | md }}* → *{{ event.new_status_name | md }}*
 {% else %}
-Статус установлен: *{{ event.new_status_name }}*
+Статус установлен: *{{ event.new_status_name | md }}*
 {% endif %}
 
-*Кто:* {{ event.changed_by.name }}
+*Кто:* {{ event.changed_by.name | md }}
 *Когда:* {{ event.occurred_at.strftime('%d.%m.%Y %H:%M') }}
 
 [Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})

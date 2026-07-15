@@ -11,9 +11,32 @@
 
 from __future__ import annotations
 
+import re
+
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
 from redmine_max_notifier.events.models import Event
+
+# Символы, имеющие смысл в markdown-диалекте MAX. Обратный слеш первым:
+# иначе он экранировал бы уже вставленные нами escape-последовательности.
+_MD_SPECIAL = re.compile(r"([\\*_`\[\]])")
+
+
+def escape_markdown(value: object) -> str:
+    """Экранировать спецсимволы markdown в тексте из Redmine.
+
+    Зачем. Тема задачи и текст комментария приходят от людей, а шаблон
+    заворачивает их в разметку: *{{ subject }}*. Тема вида
+    "Авария: *обрыв* ОК" превращает это в кашу — звёздочки внутри
+    закрывают жирный раньше времени, и дальше едет вся вёрстка
+    сообщения. Достаточно одного человека, написавшего *срочно*
+    в комментарии.
+
+    Применяется в шаблонах фильтром `| md` — ко всему, что пришло
+    из Redmine (subject, notes, description, имена). К нашему
+    собственному тексту не нужен: мы его пишем сами и знаем, что там.
+    """
+    return _MD_SPECIAL.sub(r"\\\1", str(value))
 
 
 class MessageRenderer:
@@ -40,6 +63,8 @@ class MessageRenderer:
             keep_trailing_newline=False,
         )
         self._env.globals["redmine_base_url"] = redmine_base_url.rstrip("/")
+        # Фильтр `| md` — экранирование текста из Redmine, см. escape_markdown.
+        self._env.filters["md"] = escape_markdown
 
     def render(self, event: Event) -> str:
         """Собирает markdown-сообщение по типу события.

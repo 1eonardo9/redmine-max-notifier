@@ -11,7 +11,7 @@
 
 - Окно updated_on нужно только чтобы ВЫБРАТЬ задачи. Иначе никак:
   эндпоинта /journals.json в Redmine нет, записи журнала достаются
-  исключительно через issues?include=journals.
+  только через карточку конкретной задачи (см. _fetch_updated_issues).
 - Что из выбранного действительно новое, решают id: issue.id и
   journal.id в Redmine глобально монотонны, поэтому "id больше
   виденного" не зависит от часов, репликации и часовых поясов.
@@ -144,17 +144,45 @@ async def _fetch_updated_issues(
     client: RedmineClient,
     window_start: datetime,
 ) -> list[Issue]:
-    """Забрать задачи, обновлённые начиная с window_start, вместе с журналами."""
+    """Забрать задачи, обновлённые начиная с window_start, вместе с журналами.
+
+    Два запроса вместо одного, и это не расточительность, а единственный
+    рабочий способ. Redmine поддерживает include=journals ТОЛЬКО для
+    одиночной задачи (/issues/{id}.json). В списке (/issues.json) параметр
+    молча игнорируется: ни ошибки, ни предупреждения — просто в ответе нет
+    поля journals. Проверено на живом Redmine 6.x (этап 7h).
+
+    Отсюда N+1: сначала узнаём, КАКИЕ задачи менялись, потом забираем
+    журналы поштучно. Эндпоинта "журналы пачкой" в API нет, обойти нельзя.
+    На практике N мал: за минутное окно меняется 0-3 задачи.
+    """
     since = window_start.astimezone(UTC).strftime(_REDMINE_DT_FORMAT)
-    return [
+
+    # Шаг 1: какие задачи трогали. include не просим — бесполезен (см. выше).
+    changed = [
         issue
         async for issue in client.list_issues(
-            include=["journals"],
             updated_on=f">={since}",
             sort="updated_on:asc",
             status_id="*",  # иначе Redmine молча отдаст только открытые
         )
     ]
+
+    # Шаг 2: журналы поштучно.
+    issues: list[Issue] = []
+    for issue in changed:
+        if issue.is_private:
+            # Приватную задачу спрятали от посторонних — значит и факт
+            # её существования не для общего чата проекта. Пропускаем
+            # целиком: ни new_issue, ни события из её журнала.
+            # Вторая линия обороны: сервисный юзер Redmine не должен
+            # иметь прав на приватные задачи (см. README).
+            log.debug("задача #%d приватная — пропуск", issue.id)
+            continue
+
+        issues.append(await client.get_issue(issue.id, include=["journals"]))
+
+    return issues
 
 
 def _advance_cursor(

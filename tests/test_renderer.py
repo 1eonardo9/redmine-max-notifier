@@ -18,7 +18,7 @@ from redmine_max_notifier.events.models import (
     StatusChangedEvent,
 )
 from redmine_max_notifier.redmine.models import Issue, NamedRef
-from redmine_max_notifier.renderer import MessageRenderer
+from redmine_max_notifier.renderer import MessageRenderer, escape_markdown
 
 # Дефолтные NamedRef для фабрики Issue вынесены на уровень модуля:
 # 1) обходит Ruff B008 (call в default-аргументе);
@@ -287,3 +287,79 @@ def test_due_date_approaching_overdue(renderer: MessageRenderer) -> None:
     # Минус в шаблоне снимается — показываем «5 дн.», не «-5 дн.»
     assert "5 дн." in result
     assert "-5" not in result
+
+
+# ── Экранирование markdown ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("*срочно*", r"\*срочно\*"),
+        ("файл_с_подчёркиваниями", r"файл\_с\_подчёркиваниями"),
+        ("[тег]", r"\[тег\]"),
+        ("`код`", r"\`код\`"),
+        (r"путь\сюда", r"путь\\сюда"),
+        ("обычный текст", "обычный текст"),
+    ],
+)
+def test_escape_markdown(raw: str, expected: str) -> None:
+    """Спецсимволы markdown экранируются, обычный текст не трогаем."""
+    assert escape_markdown(raw) == expected
+
+
+def test_subject_with_markdown_does_not_break_layout(
+    renderer: MessageRenderer,
+) -> None:
+    """Звёздочки в теме задачи не ломают жирный заголовок.
+
+    Шаблон заворачивает тему в *...*, а темы пишут люди. Без
+    экранирования тема «Авария: *обрыв* ОК» закрывала бы жирный
+    раньше времени, и дальше ехала вся вёрстка сообщения.
+    """
+    event = NewIssueEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(subject="Авария: *обрыв* ОК [срочно]"),
+    )
+
+    result = renderer.render(event)
+
+    assert r"*Авария: \*обрыв\* ОК \[срочно\]*" in result
+
+
+def test_comment_notes_are_escaped(renderer: MessageRenderer) -> None:
+    """Текст комментария тоже пишут люди — экранируем."""
+    event = CommentAddedEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(),
+        journal_id=1,
+        notes="Проверь _настройки_ и файл *config*",
+        author=NamedRef(id=5, name="Пётр Петров"),
+    )
+
+    result = renderer.render(event)
+
+    assert r"Проверь \_настройки\_ и файл \*config\*" in result
+
+
+# ── Вёрстка ─────────────────────────────────────────────────────────────
+
+
+def test_new_issue_fields_are_on_separate_lines(renderer: MessageRenderer) -> None:
+    """Каждое поле — на своей строке.
+
+    Регрессия: поля «Исполнитель», «Дедлайн» и «Создана» заканчивались
+    inline-конструкцией {% if %}...{% endif %}, а trim_blocks=True
+    съедает перевод строки после блочного тега — и три поля слипались
+    в одну строку. Поймано smoke'ом на живом MAX (7h).
+    """
+    event = NewIssueEvent(
+        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        issue=_make_issue(assigned_to=None, due_date=None),
+    )
+
+    result = renderer.render(event)
+
+    assert "*Исполнитель:* не назначено\n" in result
+    assert "*Дедлайн:* не установлен\n" in result
+    assert "*Создана:* 14.07.2026 15:30" in result

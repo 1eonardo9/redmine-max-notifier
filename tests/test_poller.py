@@ -5,16 +5,22 @@
 Билдеры ниже нужны только чтобы варьировать id и даты, структуру
 они не меняют.
 
-Мокаются два эндпоинта: /issues.json (детектор) и /issue_statuses.json
-(резолвер внутри него). Ответ статусов регистрируется с точным url,
-ответ задач — без url, как fallback: pytest-httpx отдаёт первый
-подходящий незанятый ответ, поэтому запрос статусов уходит в свой мок,
-а всё остальное — в мок задач.
+ВАЖНО про журналы. Redmine отдаёт include=journals только для одиночной
+задачи. В списке (/issues.json) параметр молча игнорируется — поля
+journals в ответе просто нет. Моки это воспроизводят: _mock_issue_list
+отдаёт задачи БЕЗ журналов, журналы живут только в ответах
+/issues/{id}.json. Раньше тесты клали журналы прямо в список — и
+подтверждали догадку вместо реальности: детектор был нерабочим
+наполовину, а прогон был зелёным (поймано smoke'ом на 7h).
+
+Мокаются три эндпоинта: /issues.json (список), /issues/{id}.json
+(карточка с журналами) и /issue_statuses.json (резолвер).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -80,7 +86,13 @@ def _issue(
     created_on: str,
     updated_on: str,
     journals: list[dict[str, Any]] | None = None,
+    is_private: bool = False,
 ) -> dict[str, Any]:
+    """Карточка задачи.
+
+    journals кладутся сюда только для ответа /issues/{id}.json —
+    в списке их не бывает, см. _mock_redmine.
+    """
     return {
         "id": issue_id,
         "project": {"id": 5, "name": "D-TELEKOM Infra"},
@@ -91,6 +103,7 @@ def _issue(
         "subject": f"issue-{issue_id}",
         "created_on": created_on,
         "updated_on": updated_on,
+        "is_private": is_private,
         "journals": journals or [],
     }
 
@@ -100,7 +113,11 @@ def _mock_redmine(
     base_url: str,
     issues: list[dict[str, Any]],
 ) -> None:
-    """Замокать оба эндпоинта: статусы (точный url) и задачи (fallback)."""
+    """Замокать Redmine так, как он ведёт себя на самом деле.
+
+    Список отдаёт задачи БЕЗ поля journals (Redmine игнорирует
+    include=journals для /issues.json), карточка задачи — с журналами.
+    """
     httpx_mock.add_response(
         method="GET",
         url=f"{base_url}/issue_statuses.json",
@@ -111,11 +128,26 @@ def _mock_redmine(
         # правильное поведение, а не забытый мок.
         is_optional=True,
     )
+
+    # Карточка каждой задачи — с журналами.
+    for issue in issues:
+        httpx_mock.add_response(
+            method="GET",
+            url=re.compile(rf".*/issues/{issue['id']}\.json.*"),
+            json={"issue": issue},
+            status_code=200,
+            # Приватные задачи детектор до карточки не доводит.
+            is_optional=True,
+        )
+
+    # Список — журналы из ответа выпиливаем, как это делает сам Redmine.
+    listed = [{k: v for k, v in i.items() if k != "journals"} for i in issues]
     httpx_mock.add_response(
         method="GET",
+        url=re.compile(r".*/issues\.json.*"),
         json={
-            "issues": issues,
-            "total_count": len(issues),
+            "issues": listed,
+            "total_count": len(listed),
             "offset": 0,
             "limit": 100,
         },
@@ -442,24 +474,100 @@ async def test_events_sorted_by_occurred_at(
     assert isinstance(events[1], NewIssueEvent)
 
 
-async def test_request_uses_window_journals_and_all_statuses(
+async def test_list_request_uses_window_and_all_statuses(
     client: RedmineClient,
     resolver: StatusResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
-    """Проверяем сам запрос к Redmine.
+    """Запрос списка: окно updated_on и все статусы.
 
     status_id=* — не косметика: по умолчанию /issues.json отдаёт только
     открытые задачи, и уведомление «задачу закрыли» не пришло бы никогда.
+
+    include здесь НЕ просим: Redmine его для списка игнорирует, а лишний
+    параметр в запросе намекал бы читателю, что журналы приедут отсюда.
     """
     _mock_redmine(httpx_mock, base_url, [])
 
     await poll_recent_changes(client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW)
 
-    request = httpx_mock.get_requests()[0]
-    params = request.url.params
+    params = httpx_mock.get_requests()[0].url.params
     assert params["status_id"] == "*"
-    assert params["include"] == "journals"
+    assert "include" not in params
     # Окно = last_check_at (NOW - 1мин) - lookback (5мин) = NOW - 6мин.
     assert params["updated_on"] == f">={_dt(6)}"
+
+
+async def test_journals_are_fetched_per_issue(
+    client: RedmineClient,
+    resolver: StatusResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Журналы тянутся карточкой каждой задачи, а не из списка.
+
+    Redmine отдаёт include=journals только для /issues/{id}.json — в списке
+    молча игнорирует. Без второго запроса детектор не увидел бы ни смен
+    статуса, ни комментариев, то есть половину всех уведомлений.
+    """
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                201,
+                created_on=_dt(2),
+                updated_on=_dt(1),
+                journals=[_journal(501, created_on=_dt(1), notes="из карточки")],
+            )
+        ],
+    )
+
+    events, _ = await poll_recent_changes(
+        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+    )
+
+    # Событие из журнала доехало — значит карточку реально запросили.
+    assert any(isinstance(e, CommentAddedEvent) for e in events)
+
+    requests = httpx_mock.get_requests()
+    card = next(r for r in requests if "/issues/201.json" in str(r.url))
+    assert card.url.params["include"] == "journals"
+
+
+async def test_private_issue_is_skipped_entirely(
+    client: RedmineClient,
+    resolver: StatusResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Приватная задача не даёт никаких событий.
+
+    Задачу спрятали от посторонних — значит и факт её существования
+    не для общего чата проекта. Карточку тоже не запрашиваем: нечего
+    тянуть то, что всё равно не отправим.
+    """
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                201,
+                created_on=_dt(2),
+                updated_on=_dt(1),
+                is_private=True,
+                journals=[_journal(501, created_on=_dt(1), notes="секрет")],
+            )
+        ],
+    )
+
+    events, cursor = await poll_recent_changes(
+        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+    )
+
+    assert events == []
+    assert not any("/issues/201.json" in str(r.url) for r in httpx_mock.get_requests())
+    # Курсор при этом двигается: приватную задачу мы видели и разбирать
+    # её повторно каждый цикл незачем.
+    assert cursor.last_check_at == NOW

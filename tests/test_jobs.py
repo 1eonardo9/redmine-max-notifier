@@ -66,6 +66,11 @@ def _mock_redmine_issues(
     base_url: str,
     issues: list[dict[str, Any]],
 ) -> None:
+    """Замокать Redmine так, как он ведёт себя на самом деле.
+
+    Список НЕ отдаёт журналы (Redmine игнорирует include=journals для
+    /issues.json), карточка задачи — отдаёт. См. tests/test_poller.py.
+    """
     httpx_mock.add_response(
         method="GET",
         url=f"{base_url}/issue_statuses.json",
@@ -74,14 +79,26 @@ def _mock_redmine_issues(
         is_optional=True,
         is_reusable=True,
     )
+
+    for issue in issues:
+        httpx_mock.add_response(
+            method="GET",
+            url=re.compile(rf".*/issues/{issue['id']}\.json.*"),
+            json={"issue": issue},
+            status_code=200,
+            is_optional=True,
+            is_reusable=True,
+        )
+
     # Query-строка запроса содержит текущее время, поэтому матчим
     # регуляркой по пути, а не точным URL.
+    listed = [{k: v for k, v in i.items() if k != "journals"} for i in issues]
     httpx_mock.add_response(
         method="GET",
         url=re.compile(r".*/issues\.json.*"),
         json={
-            "issues": issues,
-            "total_count": len(issues),
+            "issues": listed,
+            "total_count": len(listed),
             "offset": 0,
             "limit": 100,
         },

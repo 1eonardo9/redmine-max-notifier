@@ -6,7 +6,7 @@
 ⚠️ *Приближается дедлайн · задача #{{ event.issue.id }}*
 {% endif %}
 
-*{{ event.issue.subject }}*
+*{{ event.issue.subject | md }}*
 
 *Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') }}
 {% if event.days_before < 0 %}
@@ -16,7 +16,7 @@
 {% else %}
 *Осталось:* {{ event.days_before }} дн.
 {% endif %}
-*Статус:* {{ event.issue.status.name }}
-*Исполнитель:* {% if event.issue.assigned_to %}{{ event.issue.assigned_to.name }}{% else %}не назначено{% endif %}
+*Статус:* {{ event.issue.status.name | md }}
+*Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
 
 [Открыть в Redmine]({{ redmine_base_url }}/issues/{{ event.issue.id }})
