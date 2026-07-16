@@ -1,0 +1,22 @@
+🔄 *Задача обновлена · #{{ event.issue.id }}*
+
+*Тема:* {{ event.issue.subject | md }}
+
+{% if event.status_change %}
+*Статус:* {% if event.status_change.old %}{{ event.status_change.old | status_emoji }} *{{ event.status_change.old | md }}* → {% endif %}{{ event.status_change.new | status_emoji }} *{{ event.status_change.new | md }}*
+{% endif %}
+{% if event.priority_change %}
+*Приоритет:* {% if event.priority_change.old %}{{ event.priority_change.old | priority_emoji }} *{{ event.priority_change.old | md }}* → {% endif %}{{ event.priority_change.new | priority_emoji }} *{{ event.priority_change.new | md }}*
+{% endif %}
+{% if event.due_date_change %}
+📅 *Срок:* {{ event.due_date_change.old.strftime('%d.%m.%Y') if event.due_date_change.old else 'не установлен' }} → {{ event.due_date_change.new.strftime('%d.%m.%Y') if event.due_date_change.new else 'снят' }}
+{% endif %}
+👤 *Кем:* {{ event.author.name | md }}
+🕐 *Когда:* {{ event.occurred_at | dt }}
+{% if event.notes %}
+
+💬 {{ event.notes | truncate(500, killwords=False, end='…') | md }}
+{% endif %}
+{% if event.attachments %}
+📎 *Файлы:* {{ event.attachments | map('md') | join(', ') }}
+{% endif %}

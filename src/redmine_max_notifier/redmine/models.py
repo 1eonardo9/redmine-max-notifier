@@ -83,6 +83,18 @@ class Status(RedmineModel):
     is_closed: bool | None = None
 
 
+class Priority(RedmineModel):
+    """Приоритет задачи (issue priority enumeration).
+
+    Приходит из /enumerations/issue_priorities.json. Нужны только id и
+    name — is_default/active игнорируем (extra="ignore"). По этому списку
+    резолвер строит «id → имя», симметрично статусам.
+    """
+
+    id: int
+    name: str
+
+
 class Tracker(RedmineModel):
     """Трекер задачи (Ошибка, Фича, Поддержка и т.д.)"""
 

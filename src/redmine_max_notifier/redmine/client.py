@@ -17,7 +17,13 @@ from redmine_max_notifier.redmine.exceptions import (
     RedmineTransportError,
     RedmineValidationError,
 )
-from redmine_max_notifier.redmine.models import Issue, Journal, Status, User
+from redmine_max_notifier.redmine.models import (
+    Issue,
+    Journal,
+    Priority,
+    Status,
+    User,
+)
 
 log = logging.getLogger(__name__)
 
@@ -348,3 +354,28 @@ class RedmineClient:
         data = await self._request("GET", "/issue_statuses.json", timeout=timeout)
         statuses_data: list[dict[str, Any]] = data["issue_statuses"]
         return [Status.model_validate(s) for s in statuses_data]
+
+    async def list_issue_priorities(
+        self,
+        *,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> list[Priority]:
+        """Получить список приоритетов задач Redmine (enumeration).
+
+        Обычно ~5 штук — одна страница, пагинации нет. Нужен резолверу
+        «id приоритета → name»: journal-запись отдаёт priority_id строкой
+        (details.old_value / details.new_value), а в сообщении нужно имя
+        ("Высокий" вместо "3").
+
+        Кэширование поверх — NameResolver, как у статусов.
+
+        Endpoint: GET /enumerations/issue_priorities.json
+
+        Returns:
+            Список Priority с полями id, name.
+        """
+        data = await self._request(
+            "GET", "/enumerations/issue_priorities.json", timeout=timeout
+        )
+        priorities_data: list[dict[str, Any]] = data["issue_priorities"]
+        return [Priority.model_validate(p) for p in priorities_data]

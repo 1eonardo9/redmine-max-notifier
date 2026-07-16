@@ -5,6 +5,7 @@
 - автоматическое заполнение поля event_type;
 - иммутабельность (frozen=True);
 - запрет неизвестных полей (extra="forbid");
+- валидатор IssueUpdatedEvent: пустое событие (ни одного изменения) отклоняется;
 - парсинг discriminated union через EventAdapter (по event_type
   выбирается правильный класс);
 - отклонение невалидного/отсутствующего event_type.
@@ -16,18 +17,19 @@ JSON-фикстуру, что и клиент — это гарантирует,
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from redmine_max_notifier.events import (
-    CommentAddedEvent,
     DueDateApproachingEvent,
+    DueDateChange,
     EventAdapter,
+    IssueUpdatedEvent,
+    NameChange,
     NewIssueEvent,
-    StatusChangedEvent,
 )
 from redmine_max_notifier.redmine.models import Issue, NamedRef
 from tests.conftest import load_fixture
@@ -58,59 +60,56 @@ class TestConstruction:
         assert event.event_type == "new_issue"
         assert event.issue.id == sample_issue.id
 
-    def test_status_changed_event(self, sample_issue: Issue) -> None:
-        event = StatusChangedEvent(
+    def test_issue_updated_with_all_changes(self, sample_issue: Issue) -> None:
+        """Одна запись журнала несёт разом статус, приоритет, срок и коммент."""
+        event = IssueUpdatedEvent(
             occurred_at=datetime(2025, 1, 15, 12, 0, tzinfo=UTC),
             issue=sample_issue,
             journal_id=42,
-            old_status_id=1,
-            old_status_name="Новая",
-            new_status_id=2,
-            new_status_name="В работе",
-            changed_by=NamedRef(id=7, name="Иван Петров"),
-        )
-        assert event.event_type == "status_changed"
-        assert event.journal_id == 42
-        assert event.old_status_id == 1
-        assert event.old_status_name == "Новая"
-        assert event.new_status_id == 2
-        assert event.new_status_name == "В работе"
-
-    def test_status_changed_event_allows_no_old_status(
-        self, sample_issue: Issue
-    ) -> None:
-        """Если у самой первой смены статуса прежнего значения нет — ок."""
-        event = StatusChangedEvent(
-            occurred_at=datetime(2025, 1, 15, 12, 0, tzinfo=UTC),
-            issue=sample_issue,
-            journal_id=42,
-            new_status_id=2,
-            new_status_name="В работе",
-            changed_by=NamedRef(id=7, name="Иван Петров"),
-        )
-        assert event.old_status_id is None
-        assert event.old_status_name is None
-
-    def test_comment_added_event(self, sample_issue: Issue) -> None:
-        event = CommentAddedEvent(
-            occurred_at=datetime(2025, 1, 15, 12, 0, tzinfo=UTC),
-            issue=sample_issue,
-            journal_id=100,
-            notes="Взял в работу.",
             author=NamedRef(id=7, name="Иван Петров"),
+            status_change=NameChange(old="Новая", new="В работе"),
+            priority_change=NameChange(old="Нормальный", new="Высокий"),
+            due_date_change=DueDateChange(old=date(2026, 7, 20), new=date(2026, 7, 17)),
+            notes="Взял в работу.",
+            attachments=["схема.png"],
         )
-        assert event.event_type == "comment_added"
+        assert event.event_type == "issue_updated"
+        assert event.journal_id == 42
+        assert event.status_change is not None
+        assert event.status_change.new == "В работе"
+        assert event.priority_change is not None
+        assert event.due_date_change is not None
+        assert event.due_date_change.new == date(2026, 7, 17)
         assert event.notes == "Взял в работу."
 
-    def test_comment_added_rejects_empty_notes(self, sample_issue: Issue) -> None:
-        """Пустой notes — это не комментарий, детектор такой journal
-        должен фильтровать. Модель тоже страхует."""
-        with pytest.raises(ValidationError):
-            CommentAddedEvent(
+    def test_issue_updated_partial_only_status(self, sample_issue: Issue) -> None:
+        """Достаточно одного изменения — остальные поля остаются None."""
+        event = IssueUpdatedEvent(
+            occurred_at=datetime(2025, 1, 15, 12, 0, tzinfo=UTC),
+            issue=sample_issue,
+            journal_id=42,
+            author=NamedRef(id=7, name="Иван Петров"),
+            status_change=NameChange(new="В работе"),  # без old — первая смена
+        )
+        assert event.status_change is not None
+        assert event.status_change.old is None
+        assert event.priority_change is None
+        assert event.due_date_change is None
+        assert event.notes == ""
+        assert event.attachments == []
+
+    def test_issue_updated_rejects_empty(self, sample_issue: Issue) -> None:
+        """Ни одного изменения — событие собрать нельзя.
+
+        Пустая запись журнала — это смена того, что мы не показываем
+        (например assigned_to). Детектор такой journal фильтрует, модель
+        страхует: лучше ValidationError, чем пустое «задача обновлена».
+        """
+        with pytest.raises(ValidationError, match="хотя бы одно изменение"):
+            IssueUpdatedEvent(
                 occurred_at=datetime(2025, 1, 15, 12, 0, tzinfo=UTC),
                 issue=sample_issue,
-                journal_id=100,
-                notes="",
+                journal_id=42,
                 author=NamedRef(id=7, name="Иван Петров"),
             )
 
@@ -177,32 +176,18 @@ class TestDiscriminatedUnion:
         # Именно тот тип, не абстрактный EventBase — mypy это тоже увидит
         assert isinstance(event, NewIssueEvent)
 
-    def test_parses_status_changed(self, sample_issue: Issue) -> None:
+    def test_parses_issue_updated(self, sample_issue: Issue) -> None:
         payload = {
             **self._base_payload(sample_issue),
-            "event_type": "status_changed",
+            "event_type": "issue_updated",
             "journal_id": 42,
-            "old_status_id": 1,
-            "old_status_name": "Новая",
-            "new_status_id": 2,
-            "new_status_name": "В работе",
-            "changed_by": {"id": 7, "name": "Иван Петров"},
-        }
-        event = EventAdapter.validate_python(payload)
-        assert isinstance(event, StatusChangedEvent)
-        assert event.new_status_id == 2
-        assert event.new_status_name == "В работе"
-
-    def test_parses_comment_added(self, sample_issue: Issue) -> None:
-        payload = {
-            **self._base_payload(sample_issue),
-            "event_type": "comment_added",
-            "journal_id": 100,
-            "notes": "Взял в работу.",
             "author": {"id": 7, "name": "Иван Петров"},
+            "status_change": {"old": "Новая", "new": "В работе"},
         }
         event = EventAdapter.validate_python(payload)
-        assert isinstance(event, CommentAddedEvent)
+        assert isinstance(event, IssueUpdatedEvent)
+        assert event.status_change is not None
+        assert event.status_change.new == "В работе"
 
     def test_parses_due_date_approaching(self, sample_issue: Issue) -> None:
         payload = {
@@ -230,19 +215,17 @@ class TestDiscriminatedUnion:
     def test_roundtrip_json(self, sample_issue: Issue) -> None:
         """Событие сериализуется в JSON и парсится обратно в тот же тип.
 
-        Пригодится на Этапе 6 (хранение в БД) и в любых логах.
+        Пригодится при хранении в БД и в любых логах.
         """
-        original = StatusChangedEvent(
+        original = IssueUpdatedEvent(
             occurred_at=datetime(2025, 1, 15, 12, 0, tzinfo=UTC),
             issue=sample_issue,
             journal_id=42,
-            old_status_id=1,
-            old_status_name="Новая",
-            new_status_id=2,
-            new_status_name="В работе",
-            changed_by=NamedRef(id=7, name="Иван Петров"),
+            author=NamedRef(id=7, name="Иван Петров"),
+            status_change=NameChange(old="Новая", new="В работе"),
+            due_date_change=DueDateChange(old=None, new=date(2026, 7, 17)),
         )
         raw = original.model_dump(mode="json")
         restored = EventAdapter.validate_python(raw)
-        assert isinstance(restored, StatusChangedEvent)
+        assert isinstance(restored, IssueUpdatedEvent)
         assert restored == original

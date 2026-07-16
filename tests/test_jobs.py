@@ -21,12 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from redmine_max_notifier.jobs import JobDeps, run_due_date_cycle, run_poll_cycle
 from redmine_max_notifier.maxbot.client import MaxClient
+from redmine_max_notifier.name_resolver import NameResolver
 from redmine_max_notifier.poller import PollCursor
 from redmine_max_notifier.polling_state import load_cursor, save_cursor
 from redmine_max_notifier.redmine.client import RedmineClient
 from redmine_max_notifier.renderer import MessageRenderer
 from redmine_max_notifier.routing import add_route
-from redmine_max_notifier.status_resolver import StatusResolver
 from tests.conftest import load_fixture
 
 PROJECT_ID = 5
@@ -113,9 +113,13 @@ def deps(
     max_client: MaxClient,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> JobDeps:
+    ttl = timedelta(hours=1)
     return JobDeps(
         client=client,
-        resolver=StatusResolver(client, ttl=timedelta(hours=1)),
+        status_resolver=NameResolver(client.list_issue_statuses, ttl, label="статусов"),
+        priority_resolver=NameResolver(
+            client.list_issue_priorities, ttl, label="приоритетов"
+        ),
         renderer=MessageRenderer(redmine_base_url="http://redmine.test.local"),
         max_client=max_client,
         session_factory=db_session_factory,

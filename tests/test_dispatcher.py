@@ -21,11 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from redmine_max_notifier.dispatcher import dispatch_events
 from redmine_max_notifier.events.models import (
-    CommentAddedEvent,
     DueDateApproachingEvent,
     Event,
+    IssueUpdatedEvent,
+    NameChange,
     NewIssueEvent,
-    StatusChangedEvent,
 )
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.redmine.models import Issue, NamedRef
@@ -68,26 +68,25 @@ def _issue_with_due_date(issue_id: int = 102) -> Issue:
     return _issue(issue_id).model_copy(update={"due_date": date(2026, 7, 17)})
 
 
-def _comment_event(journal_id: int = 501) -> CommentAddedEvent:
-    return CommentAddedEvent(
+def _comment_event(journal_id: int = 501) -> IssueUpdatedEvent:
+    """Обновление задачи с комментарием — для базовых тестов доставки."""
+    return IssueUpdatedEvent(
         occurred_at=OCCURRED_AT,
         issue=_issue(),
         journal_id=journal_id,
-        notes="Починил через nmcli.",
         author=NamedRef(id=42, name="Leo Test"),
+        notes="Починил через nmcli.",
     )
 
 
-def _status_event(journal_id: int = 502) -> StatusChangedEvent:
-    return StatusChangedEvent(
+def _status_event(journal_id: int = 502) -> IssueUpdatedEvent:
+    """Обновление задачи со сменой статуса — другой journal_id, другой факт."""
+    return IssueUpdatedEvent(
         occurred_at=OCCURRED_AT,
         issue=_issue(),
         journal_id=journal_id,
-        old_status_id=2,
-        old_status_name="В работе",
-        new_status_id=3,
-        new_status_name="Решена",
-        changed_by=NamedRef(id=42, name="Leo Test"),
+        author=NamedRef(id=42, name="Leo Test"),
+        status_change=NameChange(old="В работе", new="Решена"),
     )
 
 

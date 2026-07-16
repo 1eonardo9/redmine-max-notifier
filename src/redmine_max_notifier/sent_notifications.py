@@ -23,10 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from redmine_max_notifier.db.models import SentNotification
 from redmine_max_notifier.events.models import (
-    CommentAddedEvent,
     DueDateApproachingEvent,
     Event,
-    StatusChangedEvent,
+    IssueUpdatedEvent,
 )
 
 
@@ -40,7 +39,7 @@ def journal_id_of(event: Event) -> int | None:
     isinstance по union'у, а не getattr(event, "journal_id", None):
     getattr вернул бы Any и молча проглотил бы опечатку в имени поля.
     """
-    if isinstance(event, StatusChangedEvent | CommentAddedEvent):
+    if isinstance(event, IssueUpdatedEvent):
         return event.journal_id
     return None
 

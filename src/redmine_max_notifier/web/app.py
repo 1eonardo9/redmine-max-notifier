@@ -19,6 +19,7 @@ from redmine_max_notifier.config import Settings, get_settings
 from redmine_max_notifier.db.engine import create_engine, create_session_factory
 from redmine_max_notifier.jobs import JobDeps
 from redmine_max_notifier.maxbot.client import MaxClient
+from redmine_max_notifier.name_resolver import NameResolver
 from redmine_max_notifier.redmine.client import RedmineClient
 from redmine_max_notifier.renderer import MessageRenderer
 from redmine_max_notifier.scheduler import (
@@ -26,7 +27,6 @@ from redmine_max_notifier.scheduler import (
     register_due_date_job,
     register_poll_job,
 )
-from redmine_max_notifier.status_resolver import StatusResolver
 from redmine_max_notifier.web.routes.health import router as health_router
 
 logger = logging.getLogger(__name__)
@@ -83,9 +83,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # а не на первой отправке через час после деплоя.
     ssl_context = ssl.create_default_context(cafile=settings.max_ca_bundle_path)
     max_client = MaxClient(token=settings.max_token, verify=ssl_context)
-    resolver = StatusResolver(
-        redmine_client,
-        ttl=timedelta(seconds=settings.status_cache_ttl_seconds),
+    # Два резолвера «id → имя» на одной кэш-логике (NameResolver): статусы
+    # и приоритеты Redmine отдаёт одинаково, TTL общий из настроек.
+    ttl = timedelta(seconds=settings.status_cache_ttl_seconds)
+    status_resolver = NameResolver(
+        redmine_client.list_issue_statuses, ttl, label="статусов"
+    )
+    priority_resolver = NameResolver(
+        redmine_client.list_issue_priorities, ttl, label="приоритетов"
     )
     # Ссылки в сообщениях должны вести на адрес, по которому Redmine
     # доступен пользователям, а он не обязан совпадать с тем, куда
@@ -101,7 +106,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Запуск планировщика фоновых задач")
     deps = JobDeps(
         client=redmine_client,
-        resolver=resolver,
+        status_resolver=status_resolver,
+        priority_resolver=priority_resolver,
         renderer=renderer,
         max_client=max_client,
         session_factory=session_factory,

@@ -16,7 +16,7 @@ Discriminated union позволяет функциям-обработчикам
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -65,73 +65,88 @@ class NewIssueEvent(EventBase):
     event_type: Literal["new_issue"] = "new_issue"
 
 
-class StatusChangedEvent(EventBase):
-    """Изменился статус задачи.
+class NameChange(BaseModel):
+    """Смена именованного атрибута (статус, приоритет): было → стало.
 
-    Детектируется как journal с записью в details, у которой
-    name == "status_id". old/new_status_id — сырые id из журнала
-    (Redmine отдаёт их как строки, здесь уже сконвертированы в int).
-
-    Имена статусов резолвит поллер через StatusResolver ДО создания
-    события (якорь 4.8): событие — самодостаточный факт, шаблонизатор
-    в Redmine не ходит. Если имя нового статуса не резолвится (статус
-    удалили из Redmine), событие не создаётся вовсе — см. poller.py.
-
-    old_status_id опционален: у самой первой смены статуса
-    (например, при импорте) прежнего значения может не быть.
-    old_status_name — тем более: старый статус мог быть удалён.
+    Имена уже отрезолвлены поллером (якорь 4.8) — шаблон в Redmine
+    не ходит. old опционален: у самой первой смены прежнего значения
+    может не быть (импорт, только что созданная задача). new обязателен —
+    менять всегда есть на что.
     """
 
-    event_type: Literal["status_changed"] = "status_changed"
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    old: str | None = None
+    new: str
+
+
+class DueDateChange(BaseModel):
+    """Смена срока задачи: было → стало.
+
+    Любое из полей может быть None: срок могли впервые поставить
+    (old=None) или, наоборот, снять (new=None). Даты календарные, без
+    времени и таймзоны — рендерятся как есть (в отличие от created_on,
+    который живёт в UTC и требует | dt).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    old: date | None = None
+    new: date | None = None
+
+
+class IssueUpdatedEvent(EventBase):
+    """Задачу обновили одной записью журнала.
+
+    Одна journal-запись = одно событие = одно сообщение в чат. Человек
+    в Redmine за один заход может сменить статус, приоритет и срок и тут же
+    написать комментарий — для читателя это единый факт «задачу обновили»,
+    а не четыре отдельных пинга (решение Leo, замена прежних двух событий
+    status_changed + comment_added).
+
+    Любое из изменений опционально; заполнены только те, что реально
+    произошли. Валидатор требует хоть одно — пустая запись (сменили только
+    то, что мы не показываем, например assigned_to) события не порождает.
+
+    Приватность (private_notes) глушит notes и attachments, но НЕ смены
+    атрибутов: Redmine показывает details приватной записи всем, скрыт
+    только текст заметки. Поэтому приватная запись со сменой статуса
+    доедет — просто без комментария.
+    """
+
+    event_type: Literal["issue_updated"] = "issue_updated"
     journal_id: int
-    old_status_id: int | None = None
-    old_status_name: str | None = None
-    new_status_id: int
-    new_status_name: str
-    changed_by: NamedRef
-
-
-class CommentAddedEvent(EventBase):
-    """К задаче добавили комментарий и/или прикрепили файл.
-
-    Детектируется как journal с непустым notes ЛИБО с вложениями.
-
-    Почему одно событие на два случая. Для Redmine прикрепление файла —
-    это запись в details, а текст комментария — notes, и человек в UI
-    делает это одним действием: пишет пару слов и цепляет схему. Для
-    читателя чата это тоже один факт («к задаче добавили информацию»),
-    поэтому разводить на два события и два сообщения незачем.
-    """
-
-    event_type: Literal["comment_added"] = "comment_added"
-    journal_id: int
-
-    notes: str = ""
-    """Текст комментария. Может быть пустым: файл прикрепляют и молча."""
-
-    attachments: list[str] = Field(default_factory=list)
-    """Имена прикреплённых файлов.
-
-    Только имена, без ссылок: content_url в Redmine требует авторизации,
-    и в чате она у людей может не сработать. Имени достаточно, чтобы
-    понять, что появилось.
-    """
-
     author: NamedRef
 
-    @model_validator(mode="after")
-    def _require_content(self) -> CommentAddedEvent:
-        """Событие обязано нести хоть что-то для людей.
+    status_change: NameChange | None = None
+    priority_change: NameChange | None = None
+    due_date_change: DueDateChange | None = None
 
-        Пустой notes без вложений — это чистая смена атрибутов (статус,
-        исполнитель), про которую есть свои события. Такой journal сюда
-        доходить не должен, и лучше поймать это ValidationError'ом при
-        сборке события, чем отправить в чат пустое сообщение.
+    notes: str = ""
+    """Текст комментария. Пустой — если комментария не было или он приватный."""
+
+    attachments: list[str] = Field(default_factory=list)
+    """Имена прикреплённых файлов. Только имена, без ссылок: content_url
+    в Redmine требует авторизации, которая у людей в чате может не сработать."""
+
+    @model_validator(mode="after")
+    def _require_something(self) -> IssueUpdatedEvent:
+        """Событие обязано нести хоть одно изменение.
+
+        Иначе в чат уедет пустое «задача обновлена» без единой строки —
+        это баг детектора, и поймать его ValidationError'ом при сборке
+        лучше, чем отправить пустышку.
         """
-        if not self.notes and not self.attachments:
+        if not (
+            self.status_change
+            or self.priority_change
+            or self.due_date_change
+            or self.notes
+            or self.attachments
+        ):
             raise ValueError(
-                "comment_added требует либо notes, либо attachments: "
-                "пустая запись журнала — это не комментарий"
+                "issue_updated требует хотя бы одно изменение "
+                "(статус/приоритет/срок/комментарий/вложение)"
             )
         return self
 
@@ -154,10 +169,8 @@ class DueDateApproachingEvent(EventBase):
 
 # ── Discriminated union ─────────────────────────────────────────────────
 # type X = ... — PEP 695, современный синтаксис type alias (Python 3.12+).
-# «Событие» с точки зрения обработчиков — это любой из четырёх типов.
-type Event = (
-    NewIssueEvent | StatusChangedEvent | CommentAddedEvent | DueDateApproachingEvent
-)
+# «Событие» с точки зрения обработчиков — это любой из трёх типов.
+type Event = NewIssueEvent | IssueUpdatedEvent | DueDateApproachingEvent
 
 
 # TypeAdapter — «шлюз» для парсинга произвольных dict/JSON в Union-тип.

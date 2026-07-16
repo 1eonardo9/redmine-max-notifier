@@ -1,8 +1,10 @@
-"""Тесты StatusResolver — TTL-кэша «id статуса → имя».
+"""Тесты NameResolver — обобщённого TTL-кэша «id → имя».
 
 Проверяем не столько «резолвит имена» (это тривиально), сколько сам
 контракт кэша: сколько запросов реально уходит в Redmine и при каких
-условиях.
+условиях. Резолвер один на статусы и приоритеты — загрузчик передаётся
+снаружи, поэтому большинство тестов гоняют его на статусах, а один —
+на приоритетах, чтобы убедиться, что вторая точка входа тоже работает.
 
 Время нигде не мокается: time.monotonic глобален, и event loop меряет
 им же свои таймеры — заморозив его, мы бы получили asyncio.sleep,
@@ -19,9 +21,9 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
+from redmine_max_notifier.name_resolver import NameResolver
 from redmine_max_notifier.redmine.client import RedmineClient
 from redmine_max_notifier.redmine.exceptions import RedmineAuthError
-from redmine_max_notifier.status_resolver import StatusResolver
 from tests.conftest import load_fixture
 
 # TTL, который заведомо не истечёт за время теста.
@@ -38,12 +40,17 @@ SHORT_TTL = timedelta(seconds=0.05)
 SHORT_TTL_ELAPSED = 0.2
 
 
+def _status_resolver(client: RedmineClient, ttl: timedelta) -> NameResolver:
+    """Резолвер статусов — самый частый в тестах."""
+    return NameResolver(client.list_issue_statuses, ttl, label="статусов")
+
+
 def test_rejects_non_positive_ttl(client: RedmineClient) -> None:
     """Нулевой или отрицательный TTL — ошибка конфигурации, а не
     «кэш, который всегда протух»: молча долбить API на каждый резолв
     точно не то, чего хотел вызывающий."""
     with pytest.raises(ValueError, match="ttl должен быть положительным"):
-        StatusResolver(client, ttl=timedelta(0))
+        _status_resolver(client, timedelta(0))
 
 
 async def test_resolve_returns_status_name(
@@ -58,9 +65,31 @@ async def test_resolve_returns_status_name(
         json=load_fixture("issue_statuses.json"),
         status_code=200,
     )
-    resolver = StatusResolver(client, ttl=LONG_TTL)
+    resolver = _status_resolver(client, LONG_TTL)
 
     assert await resolver.resolve(2) == "В работе"
+    assert len(httpx_mock.get_requests()) == 1
+
+
+async def test_resolve_returns_priority_name(
+    client: RedmineClient,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Тот же резолвер на другом загрузчике отдаёт имя приоритета.
+
+    Смысл теста — не имя, а то, что вторая точка входа
+    (client.list_issue_priorities) через ту же кэш-логику работает.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{base_url}/enumerations/issue_priorities.json",
+        json=load_fixture("issue_priorities.json"),
+        status_code=200,
+    )
+    resolver = NameResolver(client.list_issue_priorities, LONG_TTL, label="приоритетов")
+
+    assert await resolver.resolve(3) == "Высокий"
     assert len(httpx_mock.get_requests()) == 1
 
 
@@ -77,7 +106,7 @@ async def test_second_resolve_hits_cache_not_network(
         json=load_fixture("issue_statuses.json"),
         status_code=200,
     )
-    resolver = StatusResolver(client, ttl=LONG_TTL)
+    resolver = _status_resolver(client, LONG_TTL)
 
     assert await resolver.resolve(1) == "Новая"
     assert await resolver.resolve(5) == "Закрыта"
@@ -105,7 +134,7 @@ async def test_unknown_id_returns_none_without_refetch(
         json=load_fixture("issue_statuses.json"),
         status_code=200,
     )
-    resolver = StatusResolver(client, ttl=LONG_TTL)
+    resolver = _status_resolver(client, LONG_TTL)
 
     assert await resolver.resolve(1) == "Новая"
     assert await resolver.resolve(999) is None
@@ -146,7 +175,7 @@ async def test_cache_refreshes_after_ttl_expires(
         json=updated,
         status_code=200,
     )
-    resolver = StatusResolver(client, ttl=SHORT_TTL)
+    resolver = _status_resolver(client, SHORT_TTL)
 
     assert await resolver.resolve(2) == "В работе"
     assert await resolver.resolve(8) is None
@@ -191,7 +220,7 @@ async def test_concurrent_misses_collapse_into_one_request(
         url=f"{base_url}/issue_statuses.json",
         is_reusable=True,  # иначе повторный запрос упадёт раньше, чем assert
     )
-    resolver = StatusResolver(client, ttl=LONG_TTL)
+    resolver = _status_resolver(client, LONG_TTL)
 
     results = await asyncio.gather(*(resolver.resolve(3) for _ in range(5)))
 
@@ -222,7 +251,7 @@ async def test_client_error_propagates_and_stale_cache_is_not_served(
         status_code=401,
         text="Unauthorized",
     )
-    resolver = StatusResolver(client, ttl=SHORT_TTL)
+    resolver = _status_resolver(client, SHORT_TTL)
 
     # Кэш успешно заполнен — значение для id=1 у резолвера есть.
     assert await resolver.resolve(1) == "Новая"

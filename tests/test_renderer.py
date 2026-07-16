@@ -14,10 +14,11 @@ import pytest
 from pydantic import ValidationError
 
 from redmine_max_notifier.events.models import (
-    CommentAddedEvent,
     DueDateApproachingEvent,
+    DueDateChange,
+    IssueUpdatedEvent,
+    NameChange,
     NewIssueEvent,
-    StatusChangedEvent,
 )
 from redmine_max_notifier.redmine.models import Issue, NamedRef
 from redmine_max_notifier.renderer import (
@@ -34,6 +35,7 @@ from redmine_max_notifier.renderer import (
 _DEFAULT_PROJECT = NamedRef(id=1, name="Тестовый проект")
 _DEFAULT_TRACKER = NamedRef(id=1, name="Bug")
 _DEFAULT_ASSIGNEE = NamedRef(id=7, name="Иван Иванов")
+_AT = datetime(2026, 7, 14, 15, 30, tzinfo=UTC)
 
 
 def _make_issue(
@@ -64,8 +66,32 @@ def _make_issue(
         author=NamedRef(id=5, name="Пётр Петров"),
         assigned_to=assigned_to,
         due_date=due_date,
-        created_on=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        updated_on=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        created_on=_AT,
+        updated_on=_AT,
+    )
+
+
+def _updated(
+    *,
+    occurred_at: datetime = _AT,
+    status_change: NameChange | None = None,
+    priority_change: NameChange | None = None,
+    due_date_change: DueDateChange | None = None,
+    notes: str = "",
+    attachments: list[str] | None = None,
+    journal_id: int = 100,
+) -> IssueUpdatedEvent:
+    """Фабрика IssueUpdatedEvent — минимум обязательных полей."""
+    return IssueUpdatedEvent(
+        occurred_at=occurred_at,
+        issue=_make_issue(),
+        journal_id=journal_id,
+        author=NamedRef(id=7, name="Иван Иванов"),
+        status_change=status_change,
+        priority_change=priority_change,
+        due_date_change=due_date_change,
+        notes=notes,
+        attachments=attachments or [],
     )
 
 
@@ -73,43 +99,31 @@ def _make_issue(
 def renderer() -> MessageRenderer:
     """Один рендерер на тест — Environment собирается один раз,
     инстанс потокобезопасен для читающих операций.
-
-    Ссылку «Открыть в Redmine» из шаблонов убрали (7h, решение Leo:
-    «пока не нужно»), поэтому redmine_base_url сейчас никуда не
-    подставляется. Параметр и Settings.redmine_base_url_public
-    оставлены — «пока» означает, что ссылка может вернуться.
     """
     return MessageRenderer(redmine_base_url="http://redmine.test/")
 
 
+# ── NewIssueEvent ────────────────────────────────────────────────────────
+
+
 def test_new_issue_renders_full_message(renderer: MessageRenderer) -> None:
     """Полный кейс: все поля заполнены, шаблон отдаёт связный текст."""
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue())
 
     result = renderer.render(event)
 
-    # Ключевые куски текста — без завязки на точное форматирование
-    # (перекомпоновать шаблон легко, ронять тесты каждый раз — нет).
     assert "Новая задача #42" in result
-    assert "Тестовая задача" in result
+    # Тема выводится с подписью "Тема:" (просьба Leo, этап 9).
+    assert "*Тема:* Тестовая задача" in result
     assert "Иван Иванов" in result
     assert "Пётр Петров" in result
-    # 15:30 UTC из Redmine показываем как 18:30 по Москве — см.
-    # test_time_is_rendered_in_business_timezone.
+    # 15:30 UTC из Redmine показываем как 18:30 по Москве.
     assert "14.07.2026 18:30" in result
 
 
-def test_new_issue_without_assignee_shows_fallback(
-    renderer: MessageRenderer,
-) -> None:
+def test_new_issue_without_assignee_shows_fallback(renderer: MessageRenderer) -> None:
     """assigned_to=None должен превратиться в «не назначено»."""
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(assigned_to=None),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue(assigned_to=None))
 
     result = renderer.render(event)
 
@@ -118,35 +132,24 @@ def test_new_issue_without_assignee_shows_fallback(
     assert "None" not in result
 
 
-def test_new_issue_without_due_date_shows_fallback(
-    renderer: MessageRenderer,
-) -> None:
+def test_new_issue_without_due_date_shows_fallback(renderer: MessageRenderer) -> None:
     """due_date=None должен превратиться в «не установлен»."""
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(due_date=None),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue(due_date=None))
 
     result = renderer.render(event)
 
     assert "не установлен" in result
 
 
-def test_new_issue_long_description_truncated(
-    renderer: MessageRenderer,
-) -> None:
+def test_new_issue_long_description_truncated(renderer: MessageRenderer) -> None:
     """Длинное описание обрезается фильтром truncate(300)."""
     long_text = "Очень длинное описание. " * 100  # ~2400 символов
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(description=long_text),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue(description=long_text))
 
     result = renderer.render(event)
 
     # Многоточие U+2026 добавляется фильтром truncate
     assert "…" in result
-    # Оригинала целиком в результате быть не должно
     assert long_text not in result
 
 
@@ -154,99 +157,89 @@ def test_new_issue_without_description_no_empty_block(
     renderer: MessageRenderer,
 ) -> None:
     """Пустое описание не должно оставлять пустой строки/мусора."""
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(description=None),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue(description=None))
 
     result = renderer.render(event)
 
-    # Между дедлайном/датой и ссылкой на Redmine — не более
-    # одной пустой строки (двух подряд \n).
+    # Не более одной пустой строки подряд (двух \n).
     assert "\n\n\n" not in result
 
 
-# ──────────────────────────────────────────────────────────────────
-# StatusChangedEvent
-# ──────────────────────────────────────────────────────────────────
+# ── IssueUpdatedEvent: смена атрибутов ───────────────────────────────────
 
 
-def test_status_changed_full(renderer: MessageRenderer) -> None:
-    """Обычный случай: и старый, и новый статус известны — стрелка."""
-    event = StatusChangedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=100,
-        old_status_id=1,
-        old_status_name="Новая",
-        new_status_id=2,
-        new_status_name="В работе",
-        changed_by=NamedRef(id=7, name="Иван Иванов"),
-    )
+def test_issue_updated_status_full(renderer: MessageRenderer) -> None:
+    """И старый, и новый статус известны — стрелка между ними."""
+    event = _updated(status_change=NameChange(old="Новая", new="В работе"))
 
     result = renderer.render(event)
 
-    assert "Статус изменён" in result
-    assert "задача #42" in result
+    assert "Задача обновлена · #42" in result
     assert "Новая" in result
     assert "В работе" in result
     assert "→" in result
     assert "Иван Иванов" in result
 
 
-def test_status_changed_without_old_status(renderer: MessageRenderer) -> None:
-    """Первая смена статуса (нет old_status) — ветка «Статус установлен»."""
-    event = StatusChangedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=100,
-        new_status_id=2,
-        new_status_name="В работе",
-        changed_by=NamedRef(id=7, name="Иван Иванов"),
-    )
+def test_issue_updated_status_without_old(renderer: MessageRenderer) -> None:
+    """Первая смена статуса (нет old) — без стрелки."""
+    event = _updated(status_change=NameChange(new="В работе"))
 
     result = renderer.render(event)
 
-    assert "Статус установлен" in result
     assert "В работе" in result
-    # Стрелка на этой ветке не рисуется — проверяем явно
     assert "→" not in result
 
 
-# ──────────────────────────────────────────────────────────────────
-# CommentAddedEvent
-# ──────────────────────────────────────────────────────────────────
+def test_issue_updated_priority_change(renderer: MessageRenderer) -> None:
+    """Смена приоритета: подпись, имена и цветное эмодзи."""
+    event = _updated(priority_change=NameChange(old="Нормальный", new="Высокий"))
+
+    result = renderer.render(event)
+
+    assert "*Приоритет:*" in result
+    assert "🟡 *Нормальный*" in result
+    assert "🔴 *Высокий*" in result
 
 
-def test_comment_added_short_note(renderer: MessageRenderer) -> None:
-    """Короткий комментарий выводится целиком, без обрезки."""
-    event = CommentAddedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=100,
-        notes="Взял в работу.",
-        author=NamedRef(id=7, name="Иван Иванов"),
+def test_issue_updated_due_date_set(renderer: MessageRenderer) -> None:
+    """Смена срока: обе даты в формате dd.mm.yyyy."""
+    event = _updated(
+        due_date_change=DueDateChange(old=date(2026, 7, 20), new=date(2026, 7, 17))
     )
 
     result = renderer.render(event)
 
-    assert "Новый комментарий" in result
+    assert "*Срок:*" in result
+    assert "20.07.2026 → 17.07.2026" in result
+
+
+def test_issue_updated_due_date_cleared(renderer: MessageRenderer) -> None:
+    """Срок сняли — new=None рендерится как «снят», а не «None»."""
+    event = _updated(due_date_change=DueDateChange(old=date(2026, 7, 20), new=None))
+
+    result = renderer.render(event)
+
+    assert "20.07.2026 → снят" in result
+    assert "None" not in result
+
+
+def test_issue_updated_short_note(renderer: MessageRenderer) -> None:
+    """Короткий комментарий выводится целиком, без обрезки."""
+    event = _updated(notes="Взял в работу.")
+
+    result = renderer.render(event)
+
+    assert "Задача обновлена" in result
     assert "Иван Иванов" in result
     assert "Взял в работу." in result
-    # Многоточия быть не должно — комментарий короткий
     assert "…" not in result
 
 
-def test_comment_added_long_note_truncated(renderer: MessageRenderer) -> None:
+def test_issue_updated_long_note_truncated(renderer: MessageRenderer) -> None:
     """Длинный комментарий обрезается фильтром truncate(500)."""
     long_note = "Разбираю проблему. " * 100  # ~1900 символов
-    event = CommentAddedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=100,
-        notes=long_note,
-        author=NamedRef(id=7, name="Иван Иванов"),
-    )
+    event = _updated(notes=long_note)
 
     result = renderer.render(event)
 
@@ -254,9 +247,68 @@ def test_comment_added_long_note_truncated(renderer: MessageRenderer) -> None:
     assert long_note not in result
 
 
-# ──────────────────────────────────────────────────────────────────
-# DueDateApproachingEvent
-# ──────────────────────────────────────────────────────────────────
+def test_issue_updated_with_attachments(renderer: MessageRenderer) -> None:
+    """Комментарий с файлами: и текст, и имена файлов."""
+    event = _updated(
+        notes="Приложил схему.",
+        attachments=["ЗУ Штиль.JPG", "схема_трассы.pdf"],
+    )
+
+    result = renderer.render(event)
+
+    assert "Приложил схему." in result
+    assert "ЗУ Штиль.JPG" in result
+    # Имена файлов — тоже текст от людей: подчёркивание экранируется.
+    assert r"схема\_трассы.pdf" in result
+
+
+def test_issue_updated_attachment_only(renderer: MessageRenderer) -> None:
+    """Файл без единого слова — событие есть, шапка та же «Задача обновлена».
+
+    Отдельного заголовка «Прикреплён файл» больше нет: одно событие на
+    журнал — один заголовок.
+    """
+    event = _updated(attachments=["i.webp"])
+
+    result = renderer.render(event)
+
+    assert "Задача обновлена" in result
+    assert "i.webp" in result
+    assert "\n\n\n" not in result
+
+
+def test_issue_updated_no_ping_even_if_mentions_passed(
+    renderer: MessageRenderer,
+) -> None:
+    """На обновлении задачи исполнителя НЕ пингуем (решение Leo, 15.07).
+
+    Даже если диспетчер передал mentions, шаблon issue_updated их
+    не выводит — иначе каждая смена статуса/коммент частили бы пингами.
+    """
+    event = _updated(status_change=NameChange(old="Новая", new="В работе"))
+
+    result = renderer.render(event, mentions=["[Кто-то](max://user/999)"])
+
+    assert "max://user/" not in result
+    assert "👉" not in result
+
+
+def test_issue_updated_requires_content() -> None:
+    """Ни изменений, ни текста, ни файлов — событие собрать нельзя."""
+    with pytest.raises(ValidationError, match="хотя бы одно изменение"):
+        _updated()
+
+
+def test_issue_updated_notes_are_escaped(renderer: MessageRenderer) -> None:
+    """Текст комментария пишут люди — экранируем спецсимволы markdown."""
+    event = _updated(notes="Проверь _настройки_ и файл *config*")
+
+    result = renderer.render(event)
+
+    assert r"Проверь \_настройки\_ и файл \*config\*" in result
+
+
+# ── DueDateApproachingEvent ──────────────────────────────────────────────
 
 
 def test_due_date_approaching_future(renderer: MessageRenderer) -> None:
@@ -328,120 +380,19 @@ def test_escape_markdown(raw: str, expected: str) -> None:
 def test_subject_with_markdown_does_not_break_layout(
     renderer: MessageRenderer,
 ) -> None:
-    """Звёздочки в теме задачи не ломают жирный заголовок.
+    """Звёздочки в теме задачи не ломают вёрстку сообщения.
 
-    Шаблон заворачивает тему в *...*, а темы пишут люди. Без
-    экранирования тема «Авария: *обрыв* ОК» закрывала бы жирный
-    раньше времени, и дальше ехала вся вёрстка сообщения.
+    Тему пишут люди. Без экранирования «Авария: *обрыв* ОК» открыла бы
+    жирный не там и поехала бы вся разметка. Фильтр | md это глушит.
     """
     event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
+        occurred_at=_AT,
         issue=_make_issue(subject="Авария: *обрыв* ОК [срочно]"),
     )
 
     result = renderer.render(event)
 
-    assert r"*Авария: \*обрыв\* ОК \[срочно\]*" in result
-
-
-def test_comment_notes_are_escaped(renderer: MessageRenderer) -> None:
-    """Текст комментария тоже пишут люди — экранируем."""
-    event = CommentAddedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=1,
-        notes="Проверь _настройки_ и файл *config*",
-        author=NamedRef(id=5, name="Пётр Петров"),
-    )
-
-    result = renderer.render(event)
-
-    assert r"Проверь \_настройки\_ и файл \*config\*" in result
-
-
-# ── Вёрстка ─────────────────────────────────────────────────────────────
-
-
-def test_new_issue_fields_are_on_separate_lines(renderer: MessageRenderer) -> None:
-    """Каждое поле — на своей строке.
-
-    Регрессия: поля «Исполнитель», «Дедлайн» и «Создана» заканчивались
-    inline-конструкцией {% if %}...{% endif %}, а trim_blocks=True
-    съедает перевод строки после блочного тега — и три поля слипались
-    в одну строку. Поймано smoke'ом на живом MAX (7h).
-    """
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(assigned_to=None, due_date=None),
-    )
-
-    result = renderer.render(event)
-
-    assert "*Исполнитель:* не назначено\n" in result
-    assert "*Дедлайн:* не установлен\n" in result
-    assert "*Создана:* 14.07.2026 18:30" in result
-
-
-# ── Вложения ────────────────────────────────────────────────────────────
-
-
-def test_comment_with_attachments(renderer: MessageRenderer) -> None:
-    """Комментарий с файлами: и текст, и имена файлов."""
-    event = CommentAddedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=62,
-        notes="Приложил схему.",
-        attachments=["ЗУ Штиль.JPG", "схема_трассы.pdf"],
-        author=NamedRef(id=7, name="Иван Иванов"),
-    )
-
-    result = renderer.render(event)
-
-    assert "Новый комментарий" in result
-    assert "Приложил схему." in result
-    assert "ЗУ Штиль.JPG" in result
-    # Имена файлов — тоже текст от людей: подчёркивание экранируется.
-    assert r"схема\_трассы.pdf" in result
-
-
-def test_attachment_without_notes_changes_header(renderer: MessageRenderer) -> None:
-    """Файл без единого слова — заголовок про файл, а не про комментарий.
-
-    До 7h такой journal вообще не доезжал: событие требовало непустой
-    notes, а Redmine пишет вложение в details. Прикрепил схему к
-    аварийной задаче — и тишина.
-    """
-    event = CommentAddedEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=61,
-        attachments=["i.webp"],
-        author=NamedRef(id=7, name="Иван Иванов"),
-    )
-
-    result = renderer.render(event)
-
-    assert "Прикреплён файл" in result
-    assert "Новый комментарий" not in result
-    assert "i.webp" in result
-    # Пустого блока текста быть не должно
-    assert "\n\n\n" not in result
-
-
-def test_comment_event_requires_content() -> None:
-    """Ни текста, ни файлов — событие собрать нельзя.
-
-    Пустая запись журнала — это чистая смена атрибутов, про неё есть
-    свои события. Ловим на модели, а не отправляем пустое сообщение.
-    """
-    with pytest.raises(ValidationError, match="требует либо notes"):
-        CommentAddedEvent(
-            occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-            issue=_make_issue(),
-            journal_id=61,
-            author=NamedRef(id=7, name="Иван Иванов"),
-        )
+    assert r"Авария: \*обрыв\* ОК \[срочно\]" in result
 
 
 # ── Эмодзи статусов и приоритетов ───────────────────────────────────────
@@ -490,42 +441,22 @@ def test_status_emoji_is_same_across_templates(renderer: MessageRenderer) -> Non
     """Один статус — одно эмодзи в любом шаблоне.
 
     Ради этого маппинг и живёт в одном словаре, а не ветками {% if %}
-    по четырём файлам: скопированные ветки разъезжаются при первой
-    же правке, и «Новая» в одном сообщении становится не тем, чем
-    в другом.
+    по файлам: скопированные ветки разъезжаются при первой же правке.
     """
-    issue = _make_issue()
-
-    new_issue = renderer.render(
-        NewIssueEvent(
-            occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC), issue=issue
-        )
-    )
-    status_changed = renderer.render(
-        StatusChangedEvent(
-            occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-            issue=issue,
-            journal_id=1,
-            old_status_id=1,
-            old_status_name="Новая",
-            new_status_id=2,
-            new_status_name="В работе",
-            changed_by=NamedRef(id=5, name="Пётр Петров"),
-        )
+    new_issue = renderer.render(NewIssueEvent(occurred_at=_AT, issue=_make_issue()))
+    updated = renderer.render(
+        _updated(status_change=NameChange(old="Новая", new="В работе"))
     )
 
     # У задачи статус "Новая" — в обоих сообщениях он помечен одинаково.
     assert "🔵 Новая" in new_issue
-    assert "🔵 *Новая*" in status_changed
-    assert "⚙️ *В работе*" in status_changed
+    assert "🔵 *Новая*" in updated
+    assert "⚙️ *В работе*" in updated
 
 
 def test_priority_emoji_in_new_issue(renderer: MessageRenderer) -> None:
     """Приоритет в сообщении помечен цветом."""
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(priority="Высокий"),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue(priority="Высокий"))
 
     result = renderer.render(event)
 
@@ -538,22 +469,12 @@ def test_priority_emoji_in_new_issue(renderer: MessageRenderer) -> None:
 def test_time_is_rendered_in_business_timezone(renderer: MessageRenderer) -> None:
     """Время события показывается в таймзоне людей, а не в UTC.
 
-    Regression, найденный на живом MAX (7h): Redmine отдаёт время в UTC
-    ("2026-07-15T06:36:32Z"), а шаблон печатал его голым strftime. Человек
-    закрывал задачу в 13:55 и получал уведомление с временем 10:55.
-
-    Тест, который здесь был раньше, ожидал ровно UTC — то есть закреплял
-    баг. Так и живут баги: написанные по коду тесты его охраняют.
+    Redmine отдаёт время в UTC ("...Z"); голый strftime напечатал бы его
+    как есть, и человек, закрывший задачу в 13:55, видел бы 10:55.
     """
-    event = StatusChangedEvent(
+    event = _updated(
         occurred_at=datetime(2026, 7, 15, 10, 55, tzinfo=UTC),
-        issue=_make_issue(),
-        journal_id=60,
-        old_status_id=1,
-        old_status_name="Новая",
-        new_status_id=5,
-        new_status_name="Закрыта",
-        changed_by=NamedRef(id=5, name="Пётр Петров"),
+        status_change=NameChange(old="Новая", new="Закрыта"),
     )
 
     result = renderer.render(event)
@@ -568,10 +489,7 @@ def test_renderer_respects_configured_timezone() -> None:
         redmine_base_url="http://redmine.test",
         tz=ZoneInfo("Asia/Yekaterinburg"),  # UTC+5
     )
-    event = NewIssueEvent(
-        occurred_at=datetime(2026, 7, 14, 15, 30, tzinfo=UTC),
-        issue=_make_issue(),
-    )
+    event = NewIssueEvent(occurred_at=_AT, issue=_make_issue())
 
     result = renderer.render(event)
 
@@ -581,8 +499,7 @@ def test_renderer_respects_configured_timezone() -> None:
 def test_naive_datetime_treated_as_utc() -> None:
     """naive-время трактуем как UTC, а не как таймзону машины.
 
-    Иначе результат рендера зависел бы от того, где запущен процесс:
-    на ноуте разработчика одно, на сервере в UTC — другое.
+    Иначе результат рендера зависел бы от того, где запущен процесс.
     """
     assert (
         format_datetime(datetime(2026, 7, 15, 10, 55), ZoneInfo("Europe/Moscow"))

@@ -1,0 +1,9 @@
+{
+    "issue_priorities": [
+        {"id": 1, "name": "Низкий", "is_default": false, "active": true},
+        {"id": 2, "name": "Нормальный", "is_default": true, "active": true},
+        {"id": 3, "name": "Высокий", "is_default": false, "active": true},
+        {"id": 4, "name": "Срочный", "is_default": false, "active": true},
+        {"id": 5, "name": "Немедленный", "is_default": false, "active": true}
+    ]
+}

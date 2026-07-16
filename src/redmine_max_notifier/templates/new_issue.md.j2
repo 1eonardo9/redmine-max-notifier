@@ -1,6 +1,6 @@
 🆕 *Новая задача #{{ event.issue.id }}*
 
-*{{ event.issue.subject | md }}*
+*Тема:* {{ event.issue.subject | md }}
 
 *Статус:* {{ event.issue.status.name | status_emoji }} {{ event.issue.status.name | md }}
 *Приоритет:* {{ event.issue.priority.name | priority_emoji }} {{ event.issue.priority.name | md }}

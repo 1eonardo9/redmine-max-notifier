@@ -1,40 +1,37 @@
 """Тесты детектора изменений (poll_recent_changes).
 
-Форма мок-ответов Redmine скопирована с реальных фикстур
-(issues_page_1.json, issue_with_journals.json), а не выдумана — якорь 4.12.
-Билдеры ниже нужны только чтобы варьировать id и даты, структуру
-они не меняют.
+Форма мок-ответов Redmine скопирована с реальных фикстур и живого API
+(этап 9: priority_id и due_date в details подтверждены на боевом
+Redmine), а не выдумана — якорь 4.12.
 
 ВАЖНО про журналы. Redmine отдаёт include=journals только для одиночной
 задачи. В списке (/issues.json) параметр молча игнорируется — поля
-journals в ответе просто нет. Моки это воспроизводят: _mock_issue_list
-отдаёт задачи БЕЗ журналов, журналы живут только в ответах
-/issues/{id}.json. Раньше тесты клали журналы прямо в список — и
-подтверждали догадку вместо реальности: детектор был нерабочим
-наполовину, а прогон был зелёным (поймано smoke'ом на 7h).
+journals в ответе просто нет. Моки это воспроизводят: список отдаёт
+задачи БЕЗ журналов, журналы живут только в ответах /issues/{id}.json.
 
-Мокаются три эндпоинта: /issues.json (список), /issues/{id}.json
-(карточка с журналами) и /issue_statuses.json (резолвер).
+ВАЖНО про модель. Одна запись журнала → одно IssueUpdatedEvent, даже
+если в ней сменились и статус, и приоритет, и срок, и добавился коммент.
+Это замена прежних раздельных StatusChanged/CommentAdded (решение Leo).
+
+Мокаются четыре эндпоинта: /issues.json (список), /issues/{id}.json
+(карточка с журналами), /issue_statuses.json и
+/enumerations/issue_priorities.json (резолверы).
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
 from pytest_httpx import HTTPXMock
 
-from redmine_max_notifier.events.models import (
-    CommentAddedEvent,
-    NewIssueEvent,
-    StatusChangedEvent,
-)
+from redmine_max_notifier.events.models import IssueUpdatedEvent, NewIssueEvent
+from redmine_max_notifier.name_resolver import NameResolver
 from redmine_max_notifier.poller import PollCursor, poll_recent_changes
 from redmine_max_notifier.redmine.client import RedmineClient
-from redmine_max_notifier.status_resolver import StatusResolver
 from tests.conftest import load_fixture
 
 NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
@@ -71,12 +68,18 @@ def _journal(
     }
 
 
-def _status_detail(old: str | None, new: str | None) -> dict[str, Any]:
+def _attr_detail(name: str, old: str | None, new: str | None) -> dict[str, Any]:
+    """Смена стандартного атрибута: status_id, priority_id, due_date."""
+    return {"property": "attr", "name": name, "old_value": old, "new_value": new}
+
+
+def _attachment_detail(attachment_id: str, filename: str) -> dict[str, Any]:
+    """Так Redmine пишет прикрепление файла — проверено на живом API."""
     return {
-        "property": "attr",
-        "name": "status_id",
-        "old_value": old,
-        "new_value": new,
+        "property": "attachment",
+        "name": attachment_id,
+        "old_value": None,
+        "new_value": filename,
     }
 
 
@@ -117,15 +120,21 @@ def _mock_redmine(
 
     Список отдаёт задачи БЕЗ поля journals (Redmine игнорирует
     include=journals для /issues.json), карточка задачи — с журналами.
+    Справочники статусов и приоритетов — is_optional: резолвер идёт в сеть
+    только если в окне была смена соответствующего атрибута.
     """
     httpx_mock.add_response(
         method="GET",
         url=f"{base_url}/issue_statuses.json",
         json=load_fixture("issue_statuses.json"),
         status_code=200,
-        # Резолвер идёт в сеть только если в окне была смена статуса —
-        # в тестах без статусов этот мок останется нетронутым, и это
-        # правильное поведение, а не забытый мок.
+        is_optional=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{base_url}/enumerations/issue_priorities.json",
+        json=load_fixture("issue_priorities.json"),
+        status_code=200,
         is_optional=True,
     )
 
@@ -156,20 +165,31 @@ def _mock_redmine(
 
 
 @pytest.fixture
-def resolver(client: RedmineClient) -> StatusResolver:
-    return StatusResolver(client, ttl=timedelta(hours=1))
+def status_resolver(client: RedmineClient) -> NameResolver:
+    return NameResolver(
+        client.list_issue_statuses, timedelta(hours=1), label="статусов"
+    )
+
+
+@pytest.fixture
+def priority_resolver(client: RedmineClient) -> NameResolver:
+    return NameResolver(
+        client.list_issue_priorities, timedelta(hours=1), label="приоритетов"
+    )
 
 
 async def test_naive_now_is_rejected(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
 ) -> None:
     """naive datetime до сравнения с created_on из Redmine не доживёт —
     ловим на входе, а не TypeError'ом из глубины цикла."""
     with pytest.raises(ValueError, match="aware datetime"):
         await poll_recent_changes(
             client,
-            resolver,
+            status_resolver,
+            priority_resolver,
             WARM_CURSOR,
             lookback=LOOKBACK,
             now=datetime(2026, 7, 15, 12, 0, 0),
@@ -178,7 +198,8 @@ async def test_naive_now_is_rejected(
 
 async def test_cold_start_sets_baseline_and_sends_nothing(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -201,7 +222,12 @@ async def test_cold_start_sets_baseline_and_sends_nothing(
     )
 
     events, cursor = await poll_recent_changes(
-        client, resolver, PollCursor(), lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        PollCursor(),
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert events == []
@@ -212,7 +238,8 @@ async def test_cold_start_sets_baseline_and_sends_nothing(
 
 async def test_new_issue_detected_by_id(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -224,7 +251,12 @@ async def test_new_issue_detected_by_id(
     )
 
     events, cursor = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert len(events) == 1
@@ -237,7 +269,8 @@ async def test_new_issue_detected_by_id(
 
 async def test_known_issue_updated_is_not_new(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -255,7 +288,12 @@ async def test_known_issue_updated_is_not_new(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert events == []
@@ -263,7 +301,8 @@ async def test_known_issue_updated_is_not_new(
 
 async def test_status_change_resolves_names(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -281,7 +320,7 @@ async def test_status_change_resolves_names(
                     _journal(
                         501,
                         created_on=_dt(1),
-                        details=[_status_detail("2", "3")],
+                        details=[_attr_detail("status_id", "2", "3")],
                     )
                 ],
             )
@@ -289,29 +328,127 @@ async def test_status_change_resolves_names(
     )
 
     events, cursor = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert len(events) == 1
     event = events[0]
-    assert isinstance(event, StatusChangedEvent)
+    assert isinstance(event, IssueUpdatedEvent)
     assert event.journal_id == 501
-    assert event.old_status_id == 2
-    assert event.old_status_name == "В работе"
-    assert event.new_status_id == 3
-    assert event.new_status_name == "Решена"
-    assert event.changed_by.name == "Leo Test"
+    assert event.status_change is not None
+    assert event.status_change.old == "В работе"
+    assert event.status_change.new == "Решена"
+    assert event.priority_change is None
+    assert event.author.name == "Leo Test"
     assert cursor.last_seen_journal_id == 501
 
 
-async def test_one_journal_yields_status_and_comment(
+async def test_priority_change_resolves_names(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
-    """Человек меняет статус и пишет комментарий одним действием —
-    для чата это два разных факта."""
+    """Смена приоритета: priority_id резолвится в имя через свой резолвер."""
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                200,
+                created_on="2025-01-01T10:00:00Z",
+                updated_on=_dt(1),
+                journals=[
+                    _journal(
+                        501,
+                        created_on=_dt(1),
+                        details=[_attr_detail("priority_id", "2", "3")],
+                    )
+                ],
+            )
+        ],
+    )
+
+    events, _ = await poll_recent_changes(
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, IssueUpdatedEvent)
+    assert event.priority_change is not None
+    assert event.priority_change.old == "Нормальный"
+    assert event.priority_change.new == "Высокий"
+    assert event.status_change is None
+
+
+async def test_due_date_change_parsed(
+    client: RedmineClient,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Смена срока: даты из журнала (строки) парсятся в date, без резолва."""
+    _mock_redmine(
+        httpx_mock,
+        base_url,
+        [
+            _issue(
+                200,
+                created_on="2025-01-01T10:00:00Z",
+                updated_on=_dt(1),
+                journals=[
+                    _journal(
+                        501,
+                        created_on=_dt(1),
+                        details=[_attr_detail("due_date", "2026-07-20", "2026-07-17")],
+                    )
+                ],
+            )
+        ],
+    )
+
+    events, _ = await poll_recent_changes(
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, IssueUpdatedEvent)
+    assert event.due_date_change is not None
+    assert event.due_date_change.old == date(2026, 7, 20)
+    assert event.due_date_change.new == date(2026, 7, 17)
+
+
+async def test_one_journal_yields_single_event(
+    client: RedmineClient,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
+    base_url: str,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Статус, приоритет, срок и комментарий одной записью — ОДНО событие.
+
+    Раньше это давало два уведомления (статус и коммент отдельно);
+    теперь единый факт «задача обновлена» (решение Leo).
+    """
     _mock_redmine(
         httpx_mock,
         base_url,
@@ -325,7 +462,11 @@ async def test_one_journal_yields_status_and_comment(
                         501,
                         created_on=_dt(1),
                         notes="Починил через nmcli.",
-                        details=[_status_detail("2", "3")],
+                        details=[
+                            _attr_detail("status_id", "2", "3"),
+                            _attr_detail("priority_id", "2", "3"),
+                            _attr_detail("due_date", "2026-07-20", "2026-07-17"),
+                        ],
                     )
                 ],
             )
@@ -333,38 +474,35 @@ async def test_one_journal_yields_status_and_comment(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
-    assert len(events) == 2
-    assert {type(e) for e in events} == {StatusChangedEvent, CommentAddedEvent}
-    comment = next(e for e in events if isinstance(e, CommentAddedEvent))
-    assert comment.notes == "Починил через nmcli."
-    assert comment.author.id == 42
-
-
-def _attachment_detail(attachment_id: str, filename: str) -> dict[str, Any]:
-    """Так Redmine пишет прикрепление файла — проверено на живом API."""
-    return {
-        "property": "attachment",
-        "name": attachment_id,
-        "old_value": None,
-        "new_value": filename,
-    }
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, IssueUpdatedEvent)
+    assert event.status_change is not None and event.status_change.new == "Решена"
+    assert event.priority_change is not None and event.priority_change.new == "Высокий"
+    assert event.due_date_change is not None
+    assert event.notes == "Починил через nmcli."
+    assert event.author.id == 42
 
 
 async def test_attachment_without_notes_yields_event(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
     """Файл прикрепили молча — событие всё равно есть.
 
     Redmine пишет вложение в details, а не в notes. Пока событие
-    требовало непустой notes, такой journal пропадал: человек цеплял
-    схему к аварийной задаче, и в чат не уходило ничего (поймано
-    на живом Redmine, 7h).
+    требовало непустой notes, такой journal пропадал (поймано на 7h).
     """
     _mock_redmine(
         httpx_mock,
@@ -387,26 +525,32 @@ async def test_attachment_without_notes_yields_event(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert len(events) == 1
     event = events[0]
-    assert isinstance(event, CommentAddedEvent)
+    assert isinstance(event, IssueUpdatedEvent)
     assert event.notes == ""
     assert event.attachments == ["i.webp"]
 
 
 async def test_removed_attachment_is_not_reported_as_added(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
     """Удаление файла Redmine пишет теми же details, но имя в old_value.
 
     Без фильтра по new_value «удалил схему» приехало бы в чат как
-    «приложил схему».
+    «приложил схему». А раз больше в записи ничего нет — события нет.
     """
     _mock_redmine(
         httpx_mock,
@@ -436,7 +580,12 @@ async def test_removed_attachment_is_not_reported_as_added(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert events == []
@@ -444,14 +593,15 @@ async def test_removed_attachment_is_not_reported_as_added(
 
 async def test_private_note_hides_attachments_too(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
     """Приватная заметка прячет и файлы, приложенные к ней.
 
-    Имя файла выдаёт содержание не хуже текста ("договор_с_ценами.pdf"),
-    поэтому приватную запись пропускаем целиком.
+    Имя файла выдаёт содержание не хуже текста ("договор_с_ценами.pdf").
+    Раз кроме приватного контента в записи ничего нет — события нет.
     """
     _mock_redmine(
         httpx_mock,
@@ -475,7 +625,12 @@ async def test_private_note_hides_attachments_too(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert events == []
@@ -483,12 +638,13 @@ async def test_private_note_hides_attachments_too(
 
 async def test_private_notes_skip_comment_but_keep_status(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
     """private_notes прячет текст заметки, но не изменение атрибутов:
-    комментарий в общий чат не уходит, смена статуса — уходит."""
+    в событии остаётся смена статуса, а notes пустой."""
     _mock_redmine(
         httpx_mock,
         base_url,
@@ -503,7 +659,7 @@ async def test_private_notes_skip_comment_but_keep_status(
                         created_on=_dt(1),
                         notes="внутреннее: клиент невменяемый",
                         private_notes=True,
-                        details=[_status_detail("2", "3")],
+                        details=[_attr_detail("status_id", "2", "3")],
                     )
                 ],
             )
@@ -511,22 +667,33 @@ async def test_private_notes_skip_comment_but_keep_status(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert len(events) == 1
-    assert isinstance(events[0], StatusChangedEvent)
+    event = events[0]
+    assert isinstance(event, IssueUpdatedEvent)
+    assert event.status_change is not None
+    assert event.notes == ""
+    assert event.attachments == []
 
 
 async def test_deleted_status_is_skipped_with_warning(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Статуса нет в Redmine (удалили после того, как он попал в журнал) —
-    событие не собираем, но и молчать не имеем права."""
+    смену статуса не собираем, но и молчать не имеем права. Раз других
+    изменений в записи нет — события не будет вовсе."""
     _mock_redmine(
         httpx_mock,
         base_url,
@@ -539,7 +706,7 @@ async def test_deleted_status_is_skipped_with_warning(
                     _journal(
                         501,
                         created_on=_dt(1),
-                        details=[_status_detail("2", "99")],
+                        details=[_attr_detail("status_id", "2", "99")],
                     )
                 ],
             )
@@ -548,7 +715,12 @@ async def test_deleted_status_is_skipped_with_warning(
 
     with caplog.at_level(logging.WARNING):
         events, _ = await poll_recent_changes(
-            client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+            client,
+            status_resolver,
+            priority_resolver,
+            WARM_CURSOR,
+            lookback=LOOKBACK,
+            now=NOW,
         )
 
     assert events == []
@@ -557,7 +729,8 @@ async def test_deleted_status_is_skipped_with_warning(
 
 async def test_empty_window_keeps_cursor_ids(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -567,7 +740,12 @@ async def test_empty_window_keeps_cursor_ids(
     _mock_redmine(httpx_mock, base_url, [])
 
     events, cursor = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert events == []
@@ -578,7 +756,8 @@ async def test_empty_window_keeps_cursor_ids(
 
 async def test_events_sorted_by_occurred_at(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -603,18 +782,24 @@ async def test_events_sorted_by_occurred_at(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert len(events) == 2
     assert [e.occurred_at for e in events] == sorted(e.occurred_at for e in events)
-    assert isinstance(events[0], CommentAddedEvent)
+    assert isinstance(events[0], IssueUpdatedEvent)
     assert isinstance(events[1], NewIssueEvent)
 
 
 async def test_list_request_uses_window_and_all_statuses(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -623,12 +808,18 @@ async def test_list_request_uses_window_and_all_statuses(
     status_id=* — не косметика: по умолчанию /issues.json отдаёт только
     открытые задачи, и уведомление «задачу закрыли» не пришло бы никогда.
 
-    include здесь НЕ просим: Redmine его для списка игнорирует, а лишний
-    параметр в запросе намекал бы читателю, что журналы приедут отсюда.
+    include здесь НЕ просим: Redmine его для списка игнорирует.
     """
     _mock_redmine(httpx_mock, base_url, [])
 
-    await poll_recent_changes(client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW)
+    await poll_recent_changes(
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
+    )
 
     params = httpx_mock.get_requests()[0].url.params
     assert params["status_id"] == "*"
@@ -639,7 +830,8 @@ async def test_list_request_uses_window_and_all_statuses(
 
 async def test_journals_are_fetched_per_issue(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
@@ -647,7 +839,7 @@ async def test_journals_are_fetched_per_issue(
 
     Redmine отдаёт include=journals только для /issues/{id}.json — в списке
     молча игнорирует. Без второго запроса детектор не увидел бы ни смен
-    статуса, ни комментариев, то есть половину всех уведомлений.
+    статуса, ни комментариев.
     """
     _mock_redmine(
         httpx_mock,
@@ -663,11 +855,16 @@ async def test_journals_are_fetched_per_issue(
     )
 
     events, _ = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     # Событие из журнала доехало — значит карточку реально запросили.
-    assert any(isinstance(e, CommentAddedEvent) for e in events)
+    assert any(isinstance(e, IssueUpdatedEvent) for e in events)
 
     requests = httpx_mock.get_requests()
     card = next(r for r in requests if "/issues/201.json" in str(r.url))
@@ -676,15 +873,15 @@ async def test_journals_are_fetched_per_issue(
 
 async def test_private_issue_is_skipped_entirely(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     base_url: str,
     httpx_mock: HTTPXMock,
 ) -> None:
     """Приватная задача не даёт никаких событий.
 
     Задачу спрятали от посторонних — значит и факт её существования
-    не для общего чата проекта. Карточку тоже не запрашиваем: нечего
-    тянуть то, что всё равно не отправим.
+    не для общего чата проекта. Карточку тоже не запрашиваем.
     """
     _mock_redmine(
         httpx_mock,
@@ -701,7 +898,12 @@ async def test_private_issue_is_skipped_entirely(
     )
 
     events, cursor = await poll_recent_changes(
-        client, resolver, WARM_CURSOR, lookback=LOOKBACK, now=NOW
+        client,
+        status_resolver,
+        priority_resolver,
+        WARM_CURSOR,
+        lookback=LOOKBACK,
+        now=NOW,
     )
 
     assert events == []

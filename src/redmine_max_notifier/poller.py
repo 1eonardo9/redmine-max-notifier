@@ -24,17 +24,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from redmine_max_notifier.events.models import (
-    CommentAddedEvent,
+    DueDateChange,
     Event,
+    IssueUpdatedEvent,
+    NameChange,
     NewIssueEvent,
-    StatusChangedEvent,
 )
+from redmine_max_notifier.name_resolver import NameResolver
 from redmine_max_notifier.redmine.client import RedmineClient
-from redmine_max_notifier.redmine.models import Issue, Journal, JournalDetail
-from redmine_max_notifier.status_resolver import StatusResolver
+from redmine_max_notifier.redmine.models import Issue, Journal
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +80,8 @@ class PollCursor:
 
 async def poll_recent_changes(
     client: RedmineClient,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     cursor: PollCursor,
     *,
     lookback: timedelta,
@@ -89,8 +91,9 @@ async def poll_recent_changes(
 
     Args:
         client: Клиент Redmine.
-        resolver: Резолвер имён статусов (см. якорь 4.8 — имена статусов
-            подставляет поллер, шаблонизатор в Redmine не ходит).
+        status_resolver: Резолвер имён статусов (id → имя).
+        priority_resolver: Резолвер имён приоритетов (id → имя). Оба —
+            якорь 4.8: имена подставляет поллер, шаблон в Redmine не ходит.
         cursor: Где остановились в прошлый раз.
         lookback: На сколько расширить окно назад от last_check_at.
             Страхует от рассинхрона часов и задержек БД Redmine:
@@ -133,7 +136,9 @@ async def poll_recent_changes(
         )
         return [], new_cursor
 
-    events = await _detect_events(issues, cursor, resolver, window_start)
+    events = await _detect_events(
+        issues, cursor, status_resolver, priority_resolver, window_start
+    )
     events.sort(key=lambda e: e.occurred_at)
 
     log.info("цикл поллинга: задач в окне %d, событий %d", len(issues), len(events))
@@ -229,7 +234,8 @@ def _is_new(
 async def _detect_events(
     issues: list[Issue],
     cursor: PollCursor,
-    resolver: StatusResolver,
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
     window_start: datetime,
 ) -> list[Event]:
     """Классифицировать выбранные задачи в доменные события."""
@@ -247,7 +253,11 @@ async def _detect_events(
                 window_start,
             ):
                 continue
-            events.extend(await _events_from_journal(issue, journal, resolver))
+            event = await _events_from_journal(
+                issue, journal, status_resolver, priority_resolver
+            )
+            if event is not None:
+                events.append(event)
 
     return events
 
@@ -255,133 +265,162 @@ async def _detect_events(
 async def _events_from_journal(
     issue: Issue,
     journal: Journal,
-    resolver: StatusResolver,
-) -> list[Event]:
-    """Разобрать запись журнала в события.
+    status_resolver: NameResolver,
+    priority_resolver: NameResolver,
+) -> IssueUpdatedEvent | None:
+    """Разобрать одну запись журнала в одно событие «задача обновлена».
 
-    Одна запись может дать сразу два события: человек в Redmine меняет
-    статус и пишет комментарий одним действием, а для чата это два разных
-    факта («задача решена» и «вот что сделано»).
-    """
-    events: list[Event] = []
-
-    status_detail = next(
-        (d for d in journal.details if d.property == "attr" and d.name == "status_id"),
-        None,
-    )
-    if status_detail is not None:
-        status_event = await _build_status_event(
-            issue, journal, status_detail, resolver
-        )
-        if status_event is not None:
-            events.append(status_event)
-
-    # private_notes прячет заметку целиком — и текст, и приложенные
-    # к ней файлы. Имя файла само по себе выдаёт содержание не хуже
-    # текста ("договор_с_ценами.pdf"), так что приватную запись
-    # пропускаем полностью.
-    #
-    # На смену статуса из той же записи это не влияет: она разбирается
-    # выше и уходит как отдельное событие. Redmine показывает details
-    # приватной записи всем — приватен именно комментарий.
-    if journal.private_notes:
-        return events
-
-    # Прикрепление файла Redmine пишет в details, а не в notes:
-    # property="attachment", name=<id вложения>, new_value=<имя файла>.
-    # Удаление файла выглядит так же, но имя лежит в old_value —
-    # поэтому фильтр по new_value, иначе "удалил схему" приехало бы
-    # в чат как "приложил схему".
-    attachments = [
-        d.new_value
-        for d in journal.details
-        if d.property == "attachment" and d.new_value
-    ]
-    notes = journal.notes or ""
-
-    # Файл без единого слова — тоже событие: прикрепили схему к аварийной
-    # задаче, и об этом стоит знать. До 7h такой journal молча пропадал,
-    # потому что событие требовало непустой notes.
-    if notes or attachments:
-        events.append(
-            CommentAddedEvent(
-                occurred_at=journal.created_on,
-                issue=issue,
-                journal_id=journal.id,
-                notes=notes,
-                attachments=attachments,
-                author=journal.user,
-            )
-        )
-
-    return events
-
-
-async def _build_status_event(
-    issue: Issue,
-    journal: Journal,
-    detail: JournalDetail,
-    resolver: StatusResolver,
-) -> StatusChangedEvent | None:
-    """Собрать StatusChangedEvent из detail'а журнала.
+    Одна journal-запись = одно событие = одно сообщение. Статус, приоритет,
+    срок и комментарий, сделанные человеком одним действием, — единый факт
+    для читателя чата, а не несколько отдельных пингов (решение Leo).
 
     Returns:
-        None, если событие собрать нельзя (битый id, статус удалён из
-        Redmine). Молчать про такое нельзя — пишем warning, — но и падать
-        незачем: остальные события цикла должны уехать в чат.
+        IssueUpdatedEvent, либо None, если показывать нечего: запись сменила
+        только то, что мы не отображаем (например assigned_to), либо несла
+        лишь приватную заметку.
     """
-    new_status_id = _parse_status_id(detail.new_value)
-    if new_status_id is None:
+    status_change = await _attr_name_change(
+        journal, status_resolver, attr="status_id", label="статус"
+    )
+    priority_change = await _attr_name_change(
+        journal, priority_resolver, attr="priority_id", label="приоритет"
+    )
+    due_date_change = _due_date_change(journal)
+
+    # private_notes прячет заметку целиком — и текст, и приложенные к ней
+    # файлы (имя файла выдаёт содержание не хуже текста, "договор_с_ценами.pdf").
+    # Но смены атрибутов Redmine показывает в details приватной записи всем —
+    # их не глушим: приватен именно комментарий.
+    if journal.private_notes:
+        notes = ""
+        attachments: list[str] = []
+    else:
+        notes = journal.notes or ""
+        # Прикрепление файла — details, а не notes: property="attachment",
+        # new_value=<имя>. Удаление выглядит так же, но имя в old_value —
+        # фильтр по new_value, иначе "удалил схему" приехало бы как "приложил".
+        attachments = [
+            d.new_value
+            for d in journal.details
+            if d.property == "attachment" and d.new_value
+        ]
+
+    # Ничего показываемого — события нет. Дублирует валидатор
+    # IssueUpdatedEvent, но здесь мы решаем «слать или нет», а не «падать».
+    if not (
+        status_change or priority_change or due_date_change or notes or attachments
+    ):
+        return None
+
+    return IssueUpdatedEvent(
+        occurred_at=journal.created_on,
+        issue=issue,
+        journal_id=journal.id,
+        author=journal.user,
+        status_change=status_change,
+        priority_change=priority_change,
+        due_date_change=due_date_change,
+        notes=notes,
+        attachments=attachments,
+    )
+
+
+async def _attr_name_change(
+    journal: Journal,
+    resolver: NameResolver,
+    *,
+    attr: str,
+    label: str,
+) -> NameChange | None:
+    """Собрать NameChange из details журнала для атрибута attr (id → имя).
+
+    Общая логика для статуса и приоритета: Redmine пишет оба как
+    property="attr" с old_value/new_value в виде id-строк, а имена
+    подставляет резолвер (якорь 4.8).
+
+    Returns:
+        None, если атрибут в этой записи не менялся, либо если change
+        собрать нельзя (битый id, элемент удалён из Redmine). Про удалённый
+        элемент пишем warning, но не падаем — прочие изменения должны уехать.
+    """
+    detail = next(
+        (d for d in journal.details if d.property == "attr" and d.name == attr),
+        None,
+    )
+    if detail is None:
+        return None
+
+    new_id = _parse_int(detail.new_value)
+    if new_id is None:
         log.warning(
-            "journal #%d (задача #%d): нераспознанный new_value статуса %r — пропуск",
+            "journal #%d: нераспознанный new_value (%s) %r — пропуск",
             journal.id,
-            issue.id,
+            label,
             detail.new_value,
         )
         return None
 
-    new_status_name = await resolver.resolve(new_status_id)
-    if new_status_name is None:
-        # Статус удалили из Redmine уже после того, как он попал в журнал.
-        # Слать в чат "статус изменён на #8" бессмысленно, а придумывать
-        # заглушку — врать. Пропускаем, warning покажет рассинхрон.
+    new_name = await resolver.resolve(new_id)
+    if new_name is None:
+        # Элемент удалили из Redmine уже после того, как он попал в журнал.
+        # Слать "приоритет изменён на #3" бессмысленно, заглушка — враньё.
         log.warning(
-            "journal #%d (задача #%d): статус id=%d не найден в Redmine — пропуск",
+            "journal #%d: %s id=%d не найден в Redmine — пропуск",
             journal.id,
-            issue.id,
-            new_status_id,
+            label,
+            new_id,
         )
         return None
 
-    # Старый статус опционален: у первой смены (например, при импорте)
-    # прежнего значения может не быть, и это нормально — модель события
-    # допускает None.
-    old_status_id = _parse_status_id(detail.old_value)
-    old_status_name = (
-        await resolver.resolve(old_status_id) if old_status_id is not None else None
+    # Старое значение опционально: у первой смены прежнего может не быть.
+    old_id = _parse_int(detail.old_value)
+    old_name = await resolver.resolve(old_id) if old_id is not None else None
+
+    return NameChange(old=old_name, new=new_name)
+
+
+def _due_date_change(journal: Journal) -> DueDateChange | None:
+    """Собрать DueDateChange из details журнала.
+
+    due_date Redmine пишет как property="attr" name="due_date",
+    old_value/new_value — календарные даты строками ("2026-07-17") либо
+    null (срок сняли или впервые поставили). Резолвить нечего — даты как есть.
+    """
+    detail = next(
+        (d for d in journal.details if d.property == "attr" and d.name == "due_date"),
+        None,
     )
+    if detail is None:
+        return None
 
-    return StatusChangedEvent(
-        occurred_at=journal.created_on,
-        issue=issue,
-        journal_id=journal.id,
-        old_status_id=old_status_id,
-        old_status_name=old_status_name,
-        new_status_id=new_status_id,
-        new_status_name=new_status_name,
-        changed_by=journal.user,
-    )
+    old = _parse_date(detail.old_value)
+    new = _parse_date(detail.new_value)
+    if old is None and new is None:
+        # Оба пустых Redmine для смены срока не отдаёт, но подстрахуемся.
+        return None
+
+    return DueDateChange(old=old, new=new)
 
 
-def _parse_status_id(raw: str | None) -> int | None:
-    """Привести id статуса из журнала к int.
+def _parse_int(raw: str | None) -> int | None:
+    """Привести id из журнала к int.
 
-    Redmine отдаёт old_value/new_value строками ("2"), а иногда и null —
+    Redmine отдаёт old_value/new_value строками ("2"), иногда null —
     поэтому не int(raw) в лоб.
     """
     if raw is None:
         return None
     try:
         return int(raw)
+    except ValueError:
+        return None
+
+
+def _parse_date(raw: str | None) -> date | None:
+    """Привести дату из журнала к date. Пустое/битое → None."""
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
     except ValueError:
         return None

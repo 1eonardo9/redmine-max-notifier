@@ -6,7 +6,7 @@
 ⚠️ *Приближается дедлайн · задача #{{ event.issue.id }}*
 {% endif %}
 
-*{{ event.issue.subject | md }}*
+*Тема:* {{ event.issue.subject | md }}
 
 📅 *Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') }}
 {% if event.days_before < 0 %}

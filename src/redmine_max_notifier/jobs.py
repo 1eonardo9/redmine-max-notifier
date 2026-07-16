@@ -26,11 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from redmine_max_notifier.dispatcher import dispatch_events
 from redmine_max_notifier.events.models import DueDateApproachingEvent, Event
 from redmine_max_notifier.maxbot.client import MaxClient
+from redmine_max_notifier.name_resolver import NameResolver
 from redmine_max_notifier.poller import poll_recent_changes
 from redmine_max_notifier.polling_state import load_cursor, save_cursor
 from redmine_max_notifier.redmine.client import RedmineClient
 from redmine_max_notifier.renderer import MessageRenderer
-from redmine_max_notifier.status_resolver import StatusResolver
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,8 @@ class JobDeps:
     """
 
     client: RedmineClient
-    resolver: StatusResolver
+    status_resolver: NameResolver
+    priority_resolver: NameResolver
     renderer: MessageRenderer
     max_client: MaxClient
     session_factory: async_sessionmaker[AsyncSession]
@@ -86,7 +87,8 @@ async def run_poll_cycle(deps: JobDeps) -> None:
 
             events, new_cursor = await poll_recent_changes(
                 deps.client,
-                deps.resolver,
+                deps.status_resolver,
+                deps.priority_resolver,
                 cursor,
                 lookback=deps.lookback,
                 now=datetime.now(UTC),

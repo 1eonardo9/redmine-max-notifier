@@ -36,11 +36,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from redmine_max_notifier.config import get_settings
 from redmine_max_notifier.events.models import (
-    CommentAddedEvent,
     DueDateApproachingEvent,
+    DueDateChange,
     Event,
+    IssueUpdatedEvent,
+    NameChange,
     NewIssueEvent,
-    StatusChangedEvent,
 )
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.maxbot.exceptions import MaxError
@@ -97,52 +98,63 @@ def build_events() -> dict[str, Event]:
                 status="Новая",
             ),
         ),
-        "status_changed": StatusChangedEvent(
+        # Только смена статуса одной записью.
+        "status_changed": IssueUpdatedEvent(
             occurred_at=NOW,
             issue=_issue(),
             journal_id=60,
-            old_status_id=1,
-            old_status_name="Новая",
-            new_status_id=5,
-            new_status_name="Закрыта",
-            changed_by=MAKSIM,
+            author=MAKSIM,
+            status_change=NameChange(old="Новая", new="Закрыта"),
         ),
-        "comment_added": CommentAddedEvent(
+        # Всё разом одной записью: статус + приоритет + срок + комментарий.
+        # Главный кейс объединения — раньше это было бы несколько сообщений.
+        "issue_updated_all": IssueUpdatedEvent(
+            occurred_at=NOW,
+            issue=_issue(),
+            journal_id=64,
+            author=MAKSIM,
+            status_change=NameChange(old="Новая", new="В работе"),
+            priority_change=NameChange(old="Нормальный", new="Высокий"),
+            due_date_change=DueDateChange(old=date(2026, 7, 20), new=date(2026, 7, 17)),
+            notes="Взял в работу, поднял приоритет, сдвинул срок.",
+        ),
+        "comment_added": IssueUpdatedEvent(
             occurred_at=NOW,
             # Без исполнителя — шаблон должен написать "не назначено".
             issue=_issue(assigned_to=None),
             journal_id=59,
+            author=MAKSIM,
             notes=(
                 "Заменил SFP-модуль, линк поднялся.\n"
                 "Проверил потери: 0.3 dB, в норме.\n\n"
                 "Осталось: обжать патч-корд в кроссе и закрыть задачу."
             ),
-            author=MAKSIM,
         ),
         # Комментарий с файлами: имена намеренно с пробелами и
         # подчёркиванием — подчёркивание в markdown это разметка.
-        "comment_with_files": CommentAddedEvent(
+        "comment_with_files": IssueUpdatedEvent(
             occurred_at=NOW,
             issue=_issue(),
             journal_id=62,
+            author=MAKSIM,
             notes="Приложил схему трассы и фото кросса.",
             attachments=["ЗУ Штиль.JPG", "схема_трассы_v2.pdf"],
-            author=MAKSIM,
         ),
         # Файл без единого слова — до 7h такое молча не доезжало.
-        "file_only": CommentAddedEvent(
+        "file_only": IssueUpdatedEvent(
             occurred_at=NOW,
             issue=_issue(),
             journal_id=61,
-            attachments=["i.webp"],
             author=MAKSIM,
+            attachments=["i.webp"],
         ),
         # Таблица в комментарии: Redmine их умеет, MAX — нет.
         # Смотрим, во что превращается.
-        "comment_with_table": CommentAddedEvent(
+        "comment_with_table": IssueUpdatedEvent(
             occurred_at=NOW,
             issue=_issue(),
             journal_id=63,
+            author=MAKSIM,
             notes=(
                 "Замеры по портам:\r\n\r\n"
                 "|Порт |Затухание |\r\n"
@@ -150,7 +162,6 @@ def build_events() -> dict[str, Event]:
                 "|gi0/1 |0.3 dB |\r\n"
                 "|gi0/2 |31.7 dB |\r\n"
             ),
-            author=MAKSIM,
         ),
         "due_date_approaching": DueDateApproachingEvent(
             occurred_at=NOW,
