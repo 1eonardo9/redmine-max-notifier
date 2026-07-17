@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# rmn — прод-обёртка CLI-скриптов сервиса redmine-max-notifier.
+#
+# Зачем: у CLI-скриптов те же требования к окружению, что у alembic
+# (README, шаг 4) — Settings хочет ВСЕ обязательные переменные, а они
+# лежат в env-файле, читаемом только root'ом. Писать руками конструкцию
+# «sudo bash -c 'set -a; . env; ... sudo -u ...'» на каждую команду
+# невозможно запомнить. Этот скрипт делает её один раз.
+#
+# Установка (однократно):
+#   sudo install -m 755 deploy/rmn /usr/local/bin/rmn
+#
+# Использование: rmn help
+
+set -euo pipefail
+
+APP_DIR=/opt/redmine-max-notifier
+ENV_FILE=/etc/redmine-max-notifier/env
+SERVICE=redmine-max-notifier
+RUN_AS=redmine-notifier
+# Тот же список, что в README (шаг 4): всё обязательное для Settings.
+PRESERVE=DATABASE_URL,REDMINE_URL,REDMINE_API_KEY,MAX_TOKEN,MAX_CA_BUNDLE_PATH
+
+usage() {
+    cat <<'EOF'
+rmn — обёртка CLI сервиса redmine-max-notifier (прод)
+
+Команды с БД (сами поднимутся до root через sudo):
+  rmn mapping <args...>   scripts/user_mapping_cli.py  (@упоминания)
+  rmn routing <args...>   scripts/routing_cli.py       (проект -> чат)
+  rmn due-date            scripts/trigger_due_date.py  (разовый прогон дедлайнов)
+
+Сервис:
+  rmn status              systemctl status
+  rmn logs [args...]      journalctl -f (доп. аргументы уходят journalctl)
+  rmn restart             systemctl restart + status
+
+Примеры:
+  rmn mapping max-members
+  rmn mapping add --redmine-user-id 10 --max-user-id 252123521
+  rmn routing list
+  rmn logs --since -1h
+
+Памятки: cheatsheets/rmn.md, cheatsheets/mentions.md, cheatsheets/routing.md
+EOF
+}
+
+cmd=${1:-help}
+
+# Команды, которым нужен env-файл (640 root:redmine-notifier) —
+# перезапускаем себя от root, дальше код идёт уже с правами.
+case "$cmd" in
+    mapping|routing|due-date)
+        if [[ $EUID -ne 0 ]]; then
+            exec sudo "$0" "$@"
+        fi
+        ;;
+esac
+
+shift || true
+
+# Запуск питон-скрипта от сервисного юзера: файл БД должен принадлежать
+# ему, а не root'у — иначе сервис не сможет писать в собственную базу.
+run_py() {
+    local script=$1
+    shift
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
+    cd "$APP_DIR"
+    exec sudo -u "$RUN_AS" --preserve-env="$PRESERVE" \
+        .venv/bin/python "$script" "$@"
+}
+
+case "$cmd" in
+    mapping)  run_py scripts/user_mapping_cli.py "$@" ;;
+    routing)  run_py scripts/routing_cli.py "$@" ;;
+    due-date) run_py scripts/trigger_due_date.py "$@" ;;
+    status)   systemctl status "$SERVICE" --no-pager ;;
+    logs)     exec sudo journalctl -u "$SERVICE" -f "$@" ;;
+    restart)  sudo systemctl restart "$SERVICE"
+              systemctl status "$SERVICE" --no-pager ;;
+    help|-h|--help) usage ;;
+    *)  echo "rmn: неизвестная команда '$cmd'" >&2
+        usage >&2
+        exit 1 ;;
+esac

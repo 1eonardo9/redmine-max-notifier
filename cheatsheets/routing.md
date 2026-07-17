@@ -35,14 +35,21 @@ uv run python scripts/routing_cli.py remove --project-id 1 --chat-id -7670233881
 ## Где взять chat_id
 
 ```bash
-uv run python scripts/user_mapping_cli.py max-members
+uv run python scripts/user_mapping_cli.py max-chats   # на проде: rmn mapping max-chats
 ```
 
-Столбец `ЧАТ` покажет названия, а сам `chat_id` — в `.env`
-(`MAX_TEST_GROUP_CHAT_ID`) либо через прямой запрос к MAX:
+```
+CHAT_ID            ТИП        НАЗВАНИЕ
+-76702338811265    chat       D-Telecom NOTIFY
+```
+
+Показывает только чаты, где состоит бот: нет в списке — сначала
+добавь бота в чат. Fallback без CLI — curl с нашим CA-bundle
+(системный trust store сертификат Минцифры не знает):
 
 ```bash
-curl -H "Authorization: $MAX_TOKEN" https://platform-api2.max.ru/chats
+curl --cacert certs/ca_bundle.pem -H "Authorization: $MAX_TOKEN" \
+    https://platform-api2.max.ru/chats
 ```
 
 ## Где взять project_id

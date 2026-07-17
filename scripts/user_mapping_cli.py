@@ -111,6 +111,33 @@ async def _fetch_max_members(settings: Settings) -> list[dict[str, object]]:
     return members
 
 
+async def _fetch_max_chats(settings: Settings) -> list[dict[str, object]]:
+    """Собрать чаты, где состоит бот — источник chat_id для routing.
+
+    Раньше за chat_id приходилось ходить голым curl'ом с CA-bundle
+    (см. якорь 4.3): max-members печатал только название чата.
+    """
+    ssl_context = ssl.create_default_context(cafile=settings.max_ca_bundle_path)
+    async with httpx.AsyncClient(
+        base_url=MAX_API_BASE,
+        headers={"Authorization": settings.max_token},
+        verify=ssl_context,
+        trust_env=False,
+        timeout=15.0,
+    ) as client:
+        response = await client.get("/chats")
+        response.raise_for_status()
+
+    return [
+        {
+            "chat_id": chat["chat_id"],
+            "type": chat.get("type") or "",
+            "title": chat.get("title") or "",
+        }
+        for chat in response.json().get("chats", [])
+    ]
+
+
 async def _fetch_redmine_users(settings: Settings) -> list[tuple[int, str]]:
     """Собрать пользователей Redmine, встречающихся в задачах.
 
@@ -243,6 +270,21 @@ async def cmd_max_members(session: AsyncSession, args: argparse.Namespace) -> in
     return 0
 
 
+async def cmd_max_chats(session: AsyncSession, args: argparse.Namespace) -> int:
+    """Чаты, где есть бот — источник chat_id для routing_cli."""
+    del session, args  # ходим в API, не в БД
+    chats = await _fetch_max_chats(get_settings())
+    if not chats:
+        print("Чатов не найдено. Бот добавлен хоть в один чат?")
+        return 0
+
+    print(f"{'CHAT_ID':<18} {'ТИП':<10} {'НАЗВАНИЕ'}")
+    print(f"{'-------':<18} {'---':<10} {'--------'}")
+    for c in chats:
+        print(f"{c['chat_id']!s:<18} {c['type']!s:<10} {c['title']}")
+    return 0
+
+
 async def cmd_redmine_users(session: AsyncSession, args: argparse.Namespace) -> int:
     """Пользователи Redmine из задач — источник redmine_user_id."""
     del session, args  # ходим в API, не в БД
@@ -300,6 +342,11 @@ def build_parser() -> argparse.ArgumentParser:
         "max-members", help="Участники чатов MAX (источник max_user_id)"
     )
     p_members.set_defaults(handler=cmd_max_members)
+
+    p_chats = subparsers.add_parser(
+        "max-chats", help="Чаты MAX, где есть бот (источник chat_id для routing)"
+    )
+    p_chats.set_defaults(handler=cmd_max_chats)
 
     p_users = subparsers.add_parser(
         "redmine-users", help="Пользователи Redmine из задач (источник redmine_user_id)"
