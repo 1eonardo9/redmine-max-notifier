@@ -58,6 +58,9 @@ class JobDeps:
     session_factory: async_sessionmaker[AsyncSession]
     lookback: timedelta
     due_date_threshold_days: int
+    coexecutors_field_id: int
+    """Id кастомного поля «Соисполнители» — диспетчер достаёт по нему
+    Redmine-id для @упоминаний (Settings.coexecutors_field_id)."""
     tz: ZoneInfo
     """Бизнес-таймзона: в ней решается, какой сегодня день при сравнении
     с due_date. Явная, а не из ОС, — см. Settings.timezone."""
@@ -100,6 +103,7 @@ async def run_poll_cycle(deps: JobDeps) -> None:
                     session=session,
                     renderer=deps.renderer,
                     max_client=deps.max_client,
+                    coexecutors_field_id=deps.coexecutors_field_id,
                 )
 
             await save_cursor(session, new_cursor)
@@ -167,6 +171,7 @@ async def run_due_date_cycle(deps: JobDeps) -> None:
                 session=session,
                 renderer=deps.renderer,
                 max_client=deps.max_client,
+                coexecutors_field_id=deps.coexecutors_field_id,
             )
 
         log.info("проверка дедлайнов: задач %d, напоминаний %d", len(events), sent)

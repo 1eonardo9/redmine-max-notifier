@@ -6,6 +6,9 @@
 *Приоритет:* {{ event.issue.priority.name | priority_emoji }} {{ event.issue.priority.name | md }}
 👤 *Автор:* {{ event.issue.author.name | md }}
 👷 *Исполнитель:* {{ event.issue.assigned_to.name | md if event.issue.assigned_to else 'не назначено' }}
+{% if coexecutors %}
+👥 *Соисполнители:* {{ coexecutors | join(' ') }}
+{% endif %}
 📅 *Дедлайн:* {{ event.issue.due_date.strftime('%d.%m.%Y') if event.issue.due_date else 'не установлен' }}
 🕐 *Создана:* {{ event.issue.created_on | dt }}
 

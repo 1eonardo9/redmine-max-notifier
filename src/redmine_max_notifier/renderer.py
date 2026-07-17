@@ -188,7 +188,12 @@ class MessageRenderer:
         self._env.filters["status_emoji"] = status_emoji
         self._env.filters["priority_emoji"] = priority_emoji
 
-    def render(self, event: Event, mentions: Sequence[str] = ()) -> str:
+    def render(
+        self,
+        event: Event,
+        mentions: Sequence[str] = (),
+        coexecutors: Sequence[str] = (),
+    ) -> str:
         """Собирает markdown-сообщение по типу события.
 
         Имя шаблона выводится напрямую из event.event_type:
@@ -211,7 +216,15 @@ class MessageRenderer:
                 истинно независимо от того, есть ли у Максима MAX.
                 Резолвит их диспетчер — маппинг живёт в БД, а рендерер
                 про БД не знает.
+            coexecutors: то же самое для соисполнителей (кастомное поле
+                Redmine). Отдельно от mentions: шаблон показывает их
+                своей строкой «👥 Соисполнители:», а не вперемешку
+                с пингом исполнителя.
         """
         template_name = f"{event.event_type}.md.j2"
         template = self._env.get_template(template_name)
-        return template.render(event=event, mentions=list(mentions)).strip()
+        return template.render(
+            event=event,
+            mentions=list(mentions),
+            coexecutors=list(coexecutors),
+        ).strip()

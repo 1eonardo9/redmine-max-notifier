@@ -125,6 +125,7 @@ def deps(
         session_factory=db_session_factory,
         lookback=timedelta(minutes=5),
         due_date_threshold_days=3,
+        coexecutors_field_id=3,
         tz=TEST_TZ,
     )
 

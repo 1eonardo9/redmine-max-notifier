@@ -113,6 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_factory=session_factory,
         lookback=timedelta(seconds=settings.polling_lookback_seconds),
         due_date_threshold_days=settings.due_date_threshold_days,
+        coexecutors_field_id=settings.coexecutors_field_id,
         tz=settings.tzinfo,
     )
     scheduler = create_scheduler()

@@ -28,7 +28,7 @@ from redmine_max_notifier.events.models import (
     NewIssueEvent,
 )
 from redmine_max_notifier.maxbot.client import MaxClient
-from redmine_max_notifier.redmine.models import Issue, NamedRef
+from redmine_max_notifier.redmine.models import CustomField, Issue, NamedRef
 from redmine_max_notifier.renderer import MessageRenderer
 from redmine_max_notifier.routing import add_route
 from redmine_max_notifier.sent_notifications import is_already_sent, mark_sent
@@ -37,6 +37,7 @@ from redmine_max_notifier.user_mapping import add_mapping
 PROJECT_ID = 5
 CHAT_ID = -1001
 ASSIGNEE_ID = 10  # id исполнителя в Redmine
+COEXECUTORS_FIELD_ID = 3  # id кастомного поля «Соисполнители» (как на живом Redmine)
 OCCURRED_AT = datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
 
 # Ответ MAX на POST /messages.
@@ -60,6 +61,16 @@ def _issue(issue_id: int = 101) -> Issue:
 
 def _new_issue_event(issue_id: int = 101) -> NewIssueEvent:
     return NewIssueEvent(occurred_at=OCCURRED_AT, issue=_issue(issue_id))
+
+
+def _issue_with_coexecutors(values: list[str] | str | None) -> Issue:
+    """Задача с кастомным полем «Соисполнители».
+
+    value — список id-строк, как отдаёт живой Redmine для поля формата
+    user с multiple=true (снято с задачи 41: ["5","11","9"]).
+    """
+    field = CustomField(id=COEXECUTORS_FIELD_ID, name="Соисполнители", value=values)
+    return _issue().model_copy(update={"custom_fields": [field]})
 
 
 def _issue_with_due_date(issue_id: int = 102) -> Issue:
@@ -118,6 +129,7 @@ async def _dispatch(
         session=session,
         renderer=renderer,
         max_client=max_client,
+        coexecutors_field_id=COEXECUTORS_FIELD_ID,
     )
 
 
@@ -395,6 +407,7 @@ async def test_mark_is_committed_per_event(
             session=session,
             renderer=renderer,
             max_client=max_client,
+            coexecutors_field_id=COEXECUTORS_FIELD_ID,
         )
 
     assert sent == 2
@@ -402,3 +415,155 @@ async def test_mark_is_committed_per_event(
     async with db_session_factory() as fresh_session:
         for event in events:
             assert await is_already_sent(fresh_session, event) is True
+
+
+# ── Соисполнители (этап 9, блок 2) ──────────────────────────────────────
+
+
+async def test_coexecutors_are_mentioned(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Сопоставленные соисполнители пингуются строкой «Соисполнители»."""
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(db_session, redmine_user_id=5, max_user_id=111, max_name="Петя")
+    await add_mapping(db_session, redmine_user_id=11, max_user_id=222, max_name="Вася")
+    event = NewIssueEvent(
+        occurred_at=OCCURRED_AT, issue=_issue_with_coexecutors(["5", "11"])
+    )
+
+    sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "Соисполнители" in text
+    assert "[Петя](max://user/111)" in text
+    assert "[Вася](max://user/222)" in text
+
+
+async def test_unmapped_coexecutor_is_silently_skipped(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Соисполнитель без маппинга молча пропадает из строки (решение Leo).
+
+    В поле лежат только Redmine-id — показать несопоставленного даже
+    по имени нечем. Warning'ов тоже нет: иначе каждый цикл шумел бы
+    про одних и тех же людей (та же логика, что у исполнителя).
+    """
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(db_session, redmine_user_id=5, max_user_id=111, max_name="Петя")
+    event = NewIssueEvent(
+        occurred_at=OCCURRED_AT, issue=_issue_with_coexecutors(["5", "9"])
+    )
+
+    with caplog.at_level(logging.WARNING):
+        sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "[Петя](max://user/111)" in text
+    assert text.count("max://user/") == 1
+    assert caplog.text == ""
+
+
+async def test_no_mapped_coexecutors_no_line(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Ни один соисполнитель не сопоставлен — строки «Соисполнители» нет
+    вовсе, а не пустая «👥 *Соисполнители:*»."""
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    event = NewIssueEvent(
+        occurred_at=OCCURRED_AT, issue=_issue_with_coexecutors(["5", "9"])
+    )
+
+    sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "Соисполнители" not in text
+
+
+async def test_assignee_in_coexecutors_pinged_once(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Исполнитель сам вписан в соисполнители — пингуется один раз.
+
+    Дедуп по MAX user_id, приоритет у роли исполнителя: дубль выпадает
+    из строки «Соисполнители», а не из пинга «👉».
+    """
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(
+        db_session, redmine_user_id=ASSIGNEE_ID, max_user_id=111, max_name="Максим"
+    )
+    event = NewIssueEvent(
+        occurred_at=OCCURRED_AT,
+        issue=_issue_with_coexecutors([str(ASSIGNEE_ID)]),
+    )
+
+    sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert text.count("max://user/111") == 1
+    assert "Соисполнители" not in text
+
+
+async def test_two_redmine_users_one_max_user_pinged_once(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+) -> None:
+    """Два Redmine-соисполнителя смаплены на одного MAX-юзера —
+    в сообщении он один раз (дедуп по user_id, а не по Redmine-id)."""
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(db_session, redmine_user_id=5, max_user_id=111, max_name="Петя")
+    await add_mapping(db_session, redmine_user_id=11, max_user_id=111, max_name="Петя")
+    event = NewIssueEvent(
+        occurred_at=OCCURRED_AT, issue=_issue_with_coexecutors(["5", "11"])
+    )
+
+    sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert text.count("max://user/111") == 1
+
+
+async def test_garbage_in_coexecutors_field_warns_but_sends(
+    db_session: AsyncSession,
+    renderer: MessageRenderer,
+    max_client: MaxClient,
+    mock_max_ok: HTTPXMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Нечисловое значение в поле — warning и пропуск, уведомление уходит.
+
+    Формат user хранит только id; не-число означает, что Redmine
+    изменил формат — знать надо, но ронять доставку нельзя.
+    """
+    await add_route(db_session, project_id=PROJECT_ID, chat_id=CHAT_ID)
+    await add_mapping(db_session, redmine_user_id=5, max_user_id=111, max_name="Петя")
+    event = NewIssueEvent(
+        occurred_at=OCCURRED_AT, issue=_issue_with_coexecutors(["abc", "5"])
+    )
+
+    with caplog.at_level(logging.WARNING):
+        sent = await _dispatch([event], db_session, renderer, max_client)
+
+    assert sent == 1
+    assert "не похоже на Redmine-id" in caplog.text
+    text = json.loads(mock_max_ok.get_requests()[0].content)["text"]
+    assert "[Петя](max://user/111)" in text

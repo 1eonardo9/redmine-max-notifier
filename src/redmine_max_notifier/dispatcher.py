@@ -23,6 +23,7 @@ from redmine_max_notifier.events.models import Event
 from redmine_max_notifier.maxbot.client import MaxClient
 from redmine_max_notifier.maxbot.exceptions import MaxError
 from redmine_max_notifier.maxbot.models import MessageFormat
+from redmine_max_notifier.redmine.models import Issue
 from redmine_max_notifier.renderer import MessageRenderer, format_mention
 from redmine_max_notifier.routing import list_chats_for_project
 from redmine_max_notifier.sent_notifications import is_already_sent, mark_sent
@@ -37,6 +38,7 @@ async def dispatch_events(
     session: AsyncSession,
     renderer: MessageRenderer,
     max_client: MaxClient,
+    coexecutors_field_id: int,
 ) -> int:
     """Разослать события по чатам и отметить отправленные.
 
@@ -45,6 +47,9 @@ async def dispatch_events(
         session: Сессия БД. Диспетчер коммитит в неё сам — см. ниже.
         renderer: Рендерер markdown-сообщений.
         max_client: Клиент MAX.
+        coexecutors_field_id: Id кастомного поля «Соисполнители»
+            (Settings.coexecutors_field_id) — по нему из issue.custom_fields
+            достаются Redmine-id для @упоминаний.
 
     Returns:
         Число реально отправленных событий (без пропущенных дублей и
@@ -86,9 +91,11 @@ async def dispatch_events(
             )
             continue
 
-        mentions = await _resolve_mentions(session, event)
+        mentions, coexecutors = await _resolve_mentions(
+            session, event, coexecutors_field_id=coexecutors_field_id
+        )
 
-        if await _deliver(event, chat_ids, renderer, max_client, mentions):
+        if await _deliver(event, chat_ids, renderer, max_client, mentions, coexecutors):
             await mark_sent(session, event)
             await session.commit()
             sent_count += 1
@@ -96,27 +103,83 @@ async def dispatch_events(
     return sent_count
 
 
-async def _resolve_mentions(session: AsyncSession, event: Event) -> list[str]:
-    """Собрать @упоминания для исполнителя задачи.
+def _coexecutor_ids(issue: Issue, field_id: int) -> list[int]:
+    """Redmine-id соисполнителей из кастомного поля задачи.
+
+    Поле формата user с multiple=true отдаёт value списком id-строк
+    (["5", "11"]), но CustomField.value допускает и одиночную строку,
+    и None — нормализуем всё к списку. Нечисловое значение пропускаем
+    с warning'ом: это не наш кейс (формат user хранит только id), и
+    если такое пришло — поменялся сам Redmine, надо знать.
+
+    Нет поля с таким id или оно пусто — соисполнителей нет, [].
+    """
+    for field in issue.custom_fields:
+        if field.id != field_id:
+            continue
+        if field.value is None:
+            return []
+        values = field.value if isinstance(field.value, list) else [field.value]
+        ids: list[int] = []
+        for raw in values:
+            try:
+                ids.append(int(raw))
+            except ValueError:
+                log.warning(
+                    "задача #%d: значение %r в поле соисполнителей (id=%d) "
+                    "не похоже на Redmine-id — пропуск",
+                    issue.id,
+                    raw,
+                    field_id,
+                )
+        return ids
+    return []
+
+
+async def _resolve_mentions(
+    session: AsyncSession,
+    event: Event,
+    *,
+    coexecutors_field_id: int,
+) -> tuple[list[str], list[str]]:
+    """Собрать @упоминания: (исполнитель, соисполнители).
 
     Кого пинговать — свойство доставки, а не факт из Redmine, поэтому
     резолвим здесь, а не в детекторе: маппинг лежит в БД, а детектор
     мы держим чистым от неё (7d).
 
-    Упоминаем только исполнителя: это тот, кому задача «прилетела».
-    Автор и так знает, что создал задачу.
+    Два списка, а не один: шаблон показывает их разными строками
+    (пинг исполнителя против «👥 Соисполнители:»), сливать их значит
+    лишить рендерер возможности различить.
 
-    Пустой список — норма: человека не сопоставили с MAX (или не
+    Дедуп — по MAX user_id: один человек упоминается один раз, каким бы
+    путём он ни пришёл. Ловит и «исполнитель сам в соисполнителях», и
+    «два Redmine-юзера смаплены на одного MAX-юзера». Приоритет у роли
+    исполнителя — дубль выпадает из списка соисполнителей.
+
+    Пустые списки — норма: человека не сопоставили с MAX (или не
     сопоставят никогда — подрядчик, уволился), уведомление уйдёт без
     пинга. Молчать про это в логах тоже правильно: иначе каждый цикл
     сыпал бы warning'ами про одних и тех же людей.
     """
     assignee = event.issue.assigned_to
-    if assignee is None:
-        return []
+    assignee_users = (
+        await list_max_users_for_redmine(session, assignee.id) if assignee else []
+    )
+    seen = {u.user_id for u in assignee_users}
 
-    max_users = await list_max_users_for_redmine(session, assignee.id)
-    return [format_mention(u.user_id, u.name) for u in max_users]
+    coexecutor_mentions: list[str] = []
+    for redmine_id in _coexecutor_ids(event.issue, coexecutors_field_id):
+        for user in await list_max_users_for_redmine(session, redmine_id):
+            if user.user_id in seen:
+                continue
+            seen.add(user.user_id)
+            coexecutor_mentions.append(format_mention(user.user_id, user.name))
+
+    return (
+        [format_mention(u.user_id, u.name) for u in assignee_users],
+        coexecutor_mentions,
+    )
 
 
 async def _deliver(
@@ -125,6 +188,7 @@ async def _deliver(
     renderer: MessageRenderer,
     max_client: MaxClient,
     mentions: Sequence[str] = (),
+    coexecutors: Sequence[str] = (),
 ) -> bool:
     """Отправить событие во все чаты проекта.
 
@@ -137,7 +201,7 @@ async def _deliver(
     удалён или бота из него выкинули — это не повод лишать уведомления
     другие чаты того же проекта.
     """
-    text = renderer.render(event, mentions=mentions)
+    text = renderer.render(event, mentions=mentions, coexecutors=coexecutors)
     delivered = False
 
     for chat_id in chat_ids:
